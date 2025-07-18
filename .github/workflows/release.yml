@@ -15,12 +15,12 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v4
         with:
-          go-version: 'go 1.24.3'
+          go-version: 'go 1.24'
 
       - name: Set up Node.js
         uses: actions/setup-node@v3
         with:
-          node-version: 'v20.18.1'
+          node-version: 'v20'
 
       - name: Install frontend dependencies
         working-directory: fe
