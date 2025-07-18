@@ -20,3 +20,26 @@ build-static:
 	rm -rf fe/build
 	@echo "Build complete!"
 
+build-be: build-static
+	@echo "Building backend binaries for multiple platforms..."
+	mkdir -p bin
+
+	# Linux
+	@echo "Building for Linux (amd64)..."
+	cd be && GOOS=linux GOARCH=amd64 go build -o ../bin/okidkoki-linux-amd64 ./...
+
+	@echo "Building for Linux (arm64)..."
+	cd be && GOOS=linux GOARCH=arm64 go build -o ../bin/okidkoki-linux-arm64 ./...
+
+	# Windows
+	@echo "Building for Windows (amd64)..."
+	cd be && GOOS=windows GOARCH=amd64 go build -o ../bin/okidkoki-windows-amd64.exe ./...
+
+	# macOS
+	@echo "Building for macOS (amd64)..."
+	cd be && GOOS=darwin GOARCH=amd64 go build -o ../bin/okidkoki-darwin-amd64 ./...
+
+	@echo "Building for macOS (arm64)..."
+	cd be && GOOS=darwin GOARCH=arm64 go build -o ../bin/okidkoki-darwin-arm64 ./...
+
+	@echo "Build complete! Binaries are in bin/ directory"

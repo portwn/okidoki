@@ -1,0 +1,42 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: 'go 1.24.3'
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: 'v20.18.1'
+
+      - name: Install frontend dependencies
+        working-directory: fe
+        run: npm ci
+
+      - name: Build binaries
+        run: make build-be
+
+      - name: Create release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            bin/okidkoki-linux-amd64
+            bin/okidkoki-linux-arm64
+            bin/okidkoki-windows-amd64.exe
+            bin/okidkoki-darwin-amd64
+            bin/okidkoki-darwin-arm64
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

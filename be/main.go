@@ -217,7 +217,7 @@ func main() {
 	}
 
 	go func() {
-		log.Println("Server started at :8080")
+		log.Println("Server started at http://localhost:8080")
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatal(err)
 		}
