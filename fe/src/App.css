@@ -1571,3 +1571,25 @@ button svg {
     opacity: 1; /* Всегда показываем действия на мобильных */
   }
 }
+
+.new-document-button {
+  padding: 8px 12px;
+  margin: 8px;
+  background-color: #f0f0f0;
+  border-radius: 4px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  transition: background-color 0.2s;
+}
+
+.new-document-button:hover {
+  background-color: #e0e0e0;
+}
+
+.new-document-button svg {
+  width: 16px;
+  height: 16px;
+}

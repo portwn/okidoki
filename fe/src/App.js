@@ -64,7 +64,8 @@ const DocumentTree = ({
                           expandedNodes,
                           toggleExpand,
                           loadChildren,
-                          loadingParents
+                          loadingParents,
+                          onCreateNewDocument // Добавляем новый пропс
                       }) => {
     const renderDocuments = (docs, parentPath = []) => {
         if (!docs) return null;
@@ -115,7 +116,18 @@ const DocumentTree = ({
         });
     };
 
-    return <div className="document-tree">{renderDocuments(documents)}</div>;
+    return (
+        <div className="document-tree">
+            {/* Добавляем кнопку создания нового документа */}
+            <div
+                className="new-document-button"
+                onClick={onCreateNewDocument}
+            >
+                <FilePlusIcon /> New Document
+            </div>
+            {renderDocuments(documents)}
+        </div>
+    );
 };
 
 const HistoryList = ({ history, selectedCommit, onSelect }) => {
@@ -1963,12 +1975,13 @@ function App() {
                             <div className="move-tree-container">
                                 <DocumentTree
                                     documents={documents}
-                                    currentDocId={moveTargetId}
-                                    onSelect={(id) => setMoveTargetId(id)}
+                                    currentDocPath={currentDocument?.path}
+                                    onSelect={handleDocumentSelect}
                                     expandedNodes={expandedNodes}
                                     toggleExpand={toggleExpand}
                                     loadChildren={loadChildren}
                                     loadingParents={loadingParents}
+                                    onCreateNewDocument={startCreateNewDocument} // Передаем обработчик
                                 />
                             </div>
                             <div className="modal-buttons">
@@ -2042,11 +2055,12 @@ function App() {
                             <DocumentTree
                                 documents={documents}
                                 currentDocPath={currentDocument?.path}
-                                onSelect={handleDocumentSelect}  // Используем новый обработчик
+                                onSelect={handleDocumentSelect}
                                 expandedNodes={expandedNodes}
                                 toggleExpand={toggleExpand}
                                 loadChildren={loadChildren}
                                 loadingParents={loadingParents}
+                                onCreateNewDocument={startCreateNewDocument} // Передаем обработчик
                             />
                         )}
                     </div>
