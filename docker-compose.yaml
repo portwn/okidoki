@@ -1,0 +1,11 @@
+services:
+  app:
+    build:
+      context: .
+      args:
+        - VERSION=latest  # или конкретный тег, например "v1.2.0"
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
