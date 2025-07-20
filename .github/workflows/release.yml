@@ -33,10 +33,10 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           files: |
-            bin/okidkoki-linux-amd64
-            bin/okidkoki-linux-arm64
-            bin/okidkoki-windows-amd64.exe
-            bin/okidkoki-darwin-amd64
-            bin/okidkoki-darwin-arm64
+            bin/okidoki-linux-amd64
+            bin/okidoki-linux-arm64
+            bin/okidoki-windows-amd64.exe
+            bin/okidoki-darwin-amd64
+            bin/okidoki-darwin-arm64
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
