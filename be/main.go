@@ -101,6 +101,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	defer md.Stop()
 
 	// Initialize search engine
 	searchEngine := NewSearchEngine([]string{"english", "russian"})

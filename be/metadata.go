@@ -18,7 +18,14 @@ type Metadata struct {
 	Filename       string
 	checkPeriodMin int
 	changedFlag    bool
+	stopChan       chan struct{}
 	mu             sync.Mutex // для безопасного доступа к полям
+}
+
+func (m *Metadata) Stop() {
+	if m.stopChan != nil {
+		close(m.stopChan)
+	}
 }
 
 func NewMetadata(filename string, checkPeriodMin int) (*Metadata, error) {
@@ -42,18 +49,21 @@ func (m *Metadata) startChangeChecker() {
 	ticker := time.NewTicker(time.Duration(m.checkPeriodMin) * time.Minute)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		m.mu.Lock()
-
-		if m.changedFlag {
-			if err := m.SaveOnDisk(); err != nil {
-				fmt.Printf("Failed to auto-save metadata: %v\n", err)
-			} else {
-				m.changedFlag = false
+	for {
+		select {
+		case <-ticker.C:
+			m.mu.Lock()
+			if m.changedFlag {
+				if err := m.SaveOnDisk(); err != nil {
+					fmt.Printf("Failed to auto-save metadata: %v\n", err)
+				} else {
+					m.changedFlag = false
+				}
 			}
+			m.mu.Unlock()
+		case <-m.stopChan:
+			return // Завершаем горутину
 		}
-
-		m.mu.Unlock() // Разблокируем сразу после работы с shared state
 	}
 }
 
