@@ -97,7 +97,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	md, err := NewMetadata("data", 60)
+	md, err := NewMetadata("data", 0)
 	if err != nil {
 		log.Fatal(err)
 	}
