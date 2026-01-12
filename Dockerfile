@@ -1,20 +1,25 @@
 FROM alpine:latest
 
-RUN apk add --no-cache ca-certificates tzdata wget libc6-compat
+RUN apk add --no-cache \
+    ca-certificates \
+    tzdata \
+    wget \
+    curl \
+    jq \
+    libc6-compat
 
 WORKDIR /app
 
-ARG VERSION=v0.0
+ARG VERSION=latest
 
 RUN set -eux; \
     if [ "$VERSION" = "latest" ]; then \
-        DOWNLOAD_URL="https://github.com/portwn/okidoki/releases/download/v0.1/okidoki-linux-amd64"; \
-    else \
-        DOWNLOAD_URL="https://github.com/portwn/okidoki/releases/download/${VERSION}/okidoki-linux-amd64"; \
+        VERSION="$(curl -s https://api.github.com/repos/portwn/okidoki/releases/latest | jq -r .tag_name)"; \
     fi; \
-    wget -O /app/okidoki "$DOWNLOAD_URL" && \
-    chmod +x /app/okidoki && \
-    ls -la /app/okidoki
+    echo "Using version: $VERSION"; \
+    DOWNLOAD_URL="https://github.com/portwn/okidoki/releases/download/${VERSION}/okidoki-linux-amd64"; \
+    wget -O /app/okidoki "$DOWNLOAD_URL"; \
+    chmod +x /app/okidoki
 
 VOLUME /app/data
 EXPOSE 8080
