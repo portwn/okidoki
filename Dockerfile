@@ -1,27 +1,32 @@
+# syntax=docker/dockerfile:1
+
+# --- Frontend: build the CRA static bundle ---
+FROM node:20 AS frontend
+WORKDIR /fe
+COPY fe/package.json fe/package-lock.json ./
+RUN npm ci
+COPY fe/ ./
+RUN npm run build
+
+# --- Backend: build the binary with the embedded static bundle ---
+FROM golang:1.24 AS backend
+WORKDIR /be
+COPY be/ ./
+# //go:embed static/* requires a non-empty directory — drop the built SPA in.
+COPY --from=frontend /fe/build ./static
+RUN CGO_ENABLED=0 GOOS=linux go build -o /okidoki ./...
+
+# --- Runtime ---
 FROM alpine:latest
-
-RUN apk add --no-cache \
-    ca-certificates \
-    tzdata \
-    wget \
-    curl \
-    jq \
-    libc6-compat
-
+RUN apk add --no-cache ca-certificates tzdata
 WORKDIR /app
-
-ARG VERSION=latest
-
-RUN set -eux; \
-    if [ "$VERSION" = "latest" ]; then \
-        VERSION="$(curl -s https://api.github.com/repos/portwn/okidoki/releases/latest | jq -r .tag_name)"; \
-    fi; \
-    echo "Using version: $VERSION"; \
-    DOWNLOAD_URL="https://github.com/portwn/okidoki/releases/download/${VERSION}/okidoki-linux-amd64"; \
-    wget -O /app/okidoki "$DOWNLOAD_URL"; \
-    chmod +x /app/okidoki
+COPY --from=backend /okidoki ./okidoki
 
 VOLUME /app/data
 EXPOSE 8080
+
+# /api/documents — a cheap probe (no git status access).
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD wget -qO- http://127.0.0.1:8080/api/documents >/dev/null || exit 1
 
 CMD ["/app/okidoki"]

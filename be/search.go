@@ -2,13 +2,22 @@
 package main
 
 import (
-	"fmt"
-	"path/filepath"
+	"path"
+	"regexp"
+	"sort"
 	"strings"
 	"sync"
 
 	"github.com/kljensen/snowball"
 )
+
+// tokenize extracts words (letters/digits) and lowercases them — markdown
+// markup (#, *, `, brackets) never reaches the index.
+var wordRe = regexp.MustCompile(`[\p{L}\p{N}]+`)
+
+func tokenize(text string) []string {
+	return wordRe.FindAllString(strings.ToLower(text), -1)
+}
 
 type SearchEngine struct {
 	index     map[string]map[string]int
@@ -36,16 +45,12 @@ func (se *SearchEngine) IndexDocument(doc Document) error {
 	se.mu.Lock()
 	defer se.mu.Unlock()
 
-	fullPath := se.getBasePath(doc.Path)
+	fullPath := doc.Path
 	se.documents[fullPath] = doc
 
-	content := doc.Title + " " + doc.Content
-	words := strings.Fields(content)
+	words := tokenize(doc.Title + " " + doc.Content)
 
 	for _, word := range words {
-		word = strings.ToLower(word)
-		word = strings.Trim(word, ".,!?\"'()[]{}")
-
 		for lang := range se.languages {
 			stemmed, err := se.stemmer(word, lang, false)
 			if err == nil && stemmed != "" {
@@ -60,10 +65,10 @@ func (se *SearchEngine) IndexDocument(doc Document) error {
 	return nil
 }
 
-// Search возвращает результаты поиска с пагинацией
-// query - поисковый запрос
-// page - номер страницы (начиная с 1)
-// pageSize - количество результатов на странице
+// Search returns paginated search results.
+// query - search query
+// page - page number (starting from 1)
+// pageSize - number of results per page
 func (se *SearchEngine) Search(query string, page, pageSize int) ([]Document, int, error) {
 	se.mu.RLock()
 	defer se.mu.RUnlock()
@@ -75,13 +80,10 @@ func (se *SearchEngine) Search(query string, page, pageSize int) ([]Document, in
 		pageSize = 10
 	}
 
-	queryWords := strings.Fields(query)
+	queryWords := tokenize(query)
 	results := make(map[string]int)
 
 	for _, word := range queryWords {
-		word = strings.ToLower(word)
-		word = strings.Trim(word, ".,!?\"'()[]{}")
-
 		for lang := range se.languages {
 			stemmed, err := se.stemmer(word, lang, false)
 			if err != nil || stemmed == "" {
@@ -108,23 +110,18 @@ func (se *SearchEngine) Search(query string, page, pageSize int) ([]Document, in
 		}{path, score})
 	}
 
-	// Сортировка по релевантности (по убыванию) и пути
-	for i := 0; i < len(sortedResults); i++ {
-		for j := i + 1; j < len(sortedResults); j++ {
-			if sortedResults[j].Score == sortedResults[i].Score {
-				if sortedResults[i].Path > sortedResults[j].Path {
-					sortedResults[i], sortedResults[j] = sortedResults[j], sortedResults[i]
-				}
-			} else if sortedResults[j].Score > sortedResults[i].Score {
-				sortedResults[i], sortedResults[j] = sortedResults[j], sortedResults[i]
-			}
+	// Sort by relevance (descending), then by path (ascending).
+	sort.Slice(sortedResults, func(i, j int) bool {
+		if sortedResults[i].Score != sortedResults[j].Score {
+			return sortedResults[i].Score > sortedResults[j].Score
 		}
-	}
+		return sortedResults[i].Path < sortedResults[j].Path
+	})
 
-	// Вычисляем общее количество результатов
+	// Compute the total number of results.
 	totalResults := len(sortedResults)
 
-	// Вычисляем диапазон результатов для текущей страницы
+	// Compute the result range for the current page.
 	start := (page - 1) * pageSize
 	if start >= totalResults {
 		return []Document{}, totalResults, nil
@@ -135,7 +132,7 @@ func (se *SearchEngine) Search(query string, page, pageSize int) ([]Document, in
 		end = totalResults
 	}
 
-	// Получаем только результаты для текущей страницы
+	// Keep only the results for the current page.
 	paginatedResults := sortedResults[start:end]
 
 	var docs []Document
@@ -146,14 +143,6 @@ func (se *SearchEngine) Search(query string, page, pageSize int) ([]Document, in
 	}
 
 	return docs, totalResults, nil
-}
-
-func (se *SearchEngine) getBasePath(docPath string) string {
-	basePath := filepath.Join("data", filepath.FromSlash(docPath))
-	if docPath == "" {
-		basePath = "data"
-	}
-	return basePath
 }
 
 func (se *SearchEngine) LoadFromStorage(storage Storage) error {
@@ -182,7 +171,7 @@ func (se *SearchEngine) indexDocumentRecursive(storage Storage, doc Document) er
 	}
 
 	for _, child := range doc.Children {
-		childDoc, err := storage.GetDocument(filepath.Join(doc.Path, child.ID))
+		childDoc, err := storage.GetDocument(path.Join(doc.Path, child.ID))
 		if err != nil {
 			return err
 		}
@@ -198,29 +187,41 @@ func (se *SearchEngine) DeleteDocument(docPath string) error {
 	se.mu.Lock()
 	defer se.mu.Unlock()
 
-	fullPath := se.getBasePath(docPath)
+	se.removeDocumentLocked(docPath)
+	return nil
+}
 
-	// Проверяем существование документа
-	if _, ok := se.documents[fullPath]; !ok {
-		return fmt.Errorf("документ не найден по пути %q", docPath)
+// DeleteSubtree removes a document and its whole subtree from the index.
+func (se *SearchEngine) DeleteSubtree(docPath string) {
+	se.mu.Lock()
+	defer se.mu.Unlock()
+
+	for key := range se.documents {
+		if key == docPath || strings.HasPrefix(key, docPath+"/") {
+			se.removeDocumentLocked(key)
+		}
+	}
+}
+
+// IndexTree indexes a document and all of its child documents.
+func (se *SearchEngine) IndexTree(storage Storage, doc Document) error {
+	return se.indexDocumentRecursive(storage, doc)
+}
+
+// removeDocumentLocked removes a document from the index. Requires se.mu held.
+func (se *SearchEngine) removeDocumentLocked(fullPath string) {
+	doc, ok := se.documents[fullPath]
+	if !ok {
+		return
 	}
 
-	// Получаем содержимое документа для удаления всех его слов из индекса
-	docContent := se.documents[fullPath].Title + " " + se.documents[fullPath].Content
-	words := strings.Fields(docContent)
-
-	// Удаляем слова документа из индекса для каждого языка
+	words := tokenize(doc.Title + " " + doc.Content)
 	for lang := range se.languages {
 		for _, word := range words {
-			word = strings.ToLower(word)
-			word = strings.Trim(word, ".,!?\"'()[]{}")
-
 			stemmed, err := se.stemmer(word, lang, false)
 			if err == nil && stemmed != "" {
 				if index, ok := se.index[stemmed]; ok {
 					delete(index, fullPath)
-
-					// Если слово больше не имеет ссылок, удаляем его из общего индекса
 					if len(index) == 0 {
 						delete(se.index, stemmed)
 					}
@@ -229,8 +230,5 @@ func (se *SearchEngine) DeleteDocument(docPath string) error {
 		}
 	}
 
-	// Удаляем сам документ из карты documents
 	delete(se.documents, fullPath)
-
-	return nil
 }

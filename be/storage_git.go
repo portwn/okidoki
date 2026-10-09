@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-git/go-git/v5"
@@ -22,7 +23,22 @@ type GitStorage struct {
 	baseDir string // "data"
 	docsDir string // "data/docs"
 	repo    *git.Repository
+
+	// writeMu serializes all mutating operations (filesystem + go-git). go-git
+	// worktree and .git/index writes are not concurrency-safe, so mutations
+	// (create/update/delete/move/restore/commit) run one at a time.
+	writeMu sync.Mutex
+
+	statusMu    sync.Mutex
+	statusCache git.Status
+	statusAt    time.Time
 }
+
+// LockWrites/UnlockWrites let callers perform a compound git mutation
+// (file changes + commitChanges) atomically with respect to all other
+// storage mutations.
+func (gs *GitStorage) LockWrites()   { gs.writeMu.Lock() }
+func (gs *GitStorage) UnlockWrites() { gs.writeMu.Unlock() }
 
 type CommitHistory struct {
 	CommitHash string    `json:"commitHash"`
@@ -39,18 +55,18 @@ type DocumentHistoryResponse struct {
 }
 
 func NewGitStorage(baseDir string) (*GitStorage, error) {
-	// Создаем базовую директорию если ее нет
+	// Create the base directory if missing.
 	if err := os.MkdirAll(baseDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create base directory: %w", err)
 	}
 
-	// Создаем директорию для документов
+	// Create the documents directory.
 	docsDir := filepath.Join(baseDir, "docs")
 	if err := os.MkdirAll(docsDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create docs directory: %w", err)
 	}
 
-	// Открываем или инициализируем git репозиторий в базовой директории
+	// Open or initialize the git repository in the base directory.
 	repo, err := git.PlainOpen(baseDir)
 	if errors.Is(err, git.ErrRepositoryNotExists) {
 		repo, err = git.PlainInit(baseDir, false)
@@ -61,11 +77,89 @@ func NewGitStorage(baseDir string) (*GitStorage, error) {
 		return nil, fmt.Errorf("failed to open git repository: %w", err)
 	}
 
-	return &GitStorage{
+	gs := &GitStorage{
 		baseDir: baseDir,
 		docsDir: docsDir,
 		repo:    repo,
-	}, nil
+	}
+	if err := gs.untrackServiceFiles(); err != nil {
+		return nil, fmt.Errorf("failed to untrack service files: %w", err)
+	}
+
+	return gs, nil
+}
+
+// untrackServiceFiles stops tracking service files (metadata and drafts/*)
+// that older versions had committed into git history.
+func (gs *GitStorage) untrackServiceFiles() error {
+	idx, err := gs.repo.Storer.Index()
+	if err != nil {
+		return err
+	}
+
+	var toRemove []string
+	for _, e := range idx.Entries {
+		if e.Name == "metadata" || strings.HasPrefix(e.Name, "drafts/") {
+			toRemove = append(toRemove, e.Name)
+		}
+	}
+	if len(toRemove) == 0 {
+		return nil
+	}
+
+	for _, name := range toRemove {
+		if _, err := idx.Remove(name); err != nil {
+			return err
+		}
+	}
+	if err := gs.repo.Storer.SetIndex(idx); err != nil {
+		return err
+	}
+
+	w, err := gs.repo.Worktree()
+	if err != nil {
+		return err
+	}
+	if _, err := w.Commit("Stop tracking service files (metadata, drafts)", &git.CommitOptions{
+		Author: &object.Signature{
+			Name:  "Document System",
+			Email: "docs@system",
+			When:  time.Now(),
+		},
+	}); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// cachedStatus returns the git status with a short TTL: a full Status() is
+// expensive and it is called on every GET document for the uncommitted flag.
+func (gs *GitStorage) cachedStatus() (git.Status, error) {
+	gs.statusMu.Lock()
+	defer gs.statusMu.Unlock()
+
+	if gs.statusCache != nil && time.Since(gs.statusAt) < 2*time.Second {
+		return gs.statusCache, nil
+	}
+
+	w, err := gs.repo.Worktree()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get worktree: %w", err)
+	}
+	status, err := w.Status()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get git status: %w", err)
+	}
+	gs.statusCache = status
+	gs.statusAt = time.Now()
+	return status, nil
+}
+
+func (gs *GitStorage) invalidateStatus() {
+	gs.statusMu.Lock()
+	gs.statusCache = nil
+	gs.statusMu.Unlock()
 }
 
 func (gs *GitStorage) commitChanges(message string) error {
@@ -74,19 +168,28 @@ func (gs *GitStorage) commitChanges(message string) error {
 		return fmt.Errorf("failed to get worktree: %w", err)
 	}
 
-	// Add all changes
-	_, err = w.Add(".")
-	if err != nil {
+	// Commit only documents (data/docs). Drafts and metadata are service
+	// data and do not belong in git history.
+	if _, err = w.Add("docs"); err != nil {
 		return fmt.Errorf("failed to add changes: %w", err)
 	}
 
-	// Check if there are any changes to commit
 	status, err := w.Status()
 	if err != nil {
 		return fmt.Errorf("failed to get status: %w", err)
 	}
 
-	if status.IsClean() {
+	changed := false
+	for filePath, fs := range status {
+		if filePath != "docs" && !strings.HasPrefix(filePath, "docs/") {
+			continue
+		}
+		if fs.Worktree != git.Unmodified || fs.Staging != git.Unmodified {
+			changed = true
+			break
+		}
+	}
+	if !changed {
 		return nil // No changes to commit
 	}
 
@@ -101,6 +204,7 @@ func (gs *GitStorage) commitChanges(message string) error {
 	if err != nil {
 		return fmt.Errorf("failed to commit changes: %w", err)
 	}
+	gs.invalidateStatus()
 
 	return nil
 }
@@ -184,38 +288,33 @@ func (gs *GitStorage) GetDocument(docPath string) (Document, error) {
 }
 
 func (gs *GitStorage) isUncommited(docPath string) (bool, error) {
-	w, err := gs.repo.Worktree()
+	status, err := gs.cachedStatus()
 	if err != nil {
-		return false, fmt.Errorf("failed to get worktree: %w", err)
+		return false, err
 	}
 
-	status, err := w.Status()
-	if err != nil {
-		return false, fmt.Errorf("failed to get git status: %w", err)
-	}
-
-	// Получаем относительный путь к файлу документа
+	// Get the relative path to the document file.
 	title, err := gs.getTitle(docPath)
 	if err != nil {
 		return false, err
 	}
 	relFilePath := filepath.Join("docs", docPath, title+".md")
-	relFilePath = filepath.ToSlash(relFilePath) // Нормализуем путь для git
+	relFilePath = filepath.ToSlash(relFilePath) // Normalize the path for git.
 
-	// Проверяем статус файла документа
+	// Check the status of the document file.
 	fileStatus, ok := status[relFilePath]
 	if ok && (fileStatus.Worktree != git.Unmodified || fileStatus.Staging != git.Unmodified) {
 		return true, nil
 	}
 
-	// Проверяем статус директории документа (на случай если изменились дочерние элементы)
+	// Also check the document directory status (in case children changed).
 	relDirPath := filepath.Join("docs", docPath)
 	relDirPath = filepath.ToSlash(relDirPath) + "/"
 
 	for filePath := range status {
 		if strings.HasPrefix(filePath, relDirPath) {
 			fstatus := status[filePath]
-			if fstatus.Worktree != git.Unmodified || fileStatus.Staging != git.Unmodified {
+			if fstatus.Worktree != git.Unmodified || fstatus.Staging != git.Unmodified {
 				return true, nil
 			}
 		}
@@ -232,6 +331,9 @@ func (gs *GitStorage) GetChildDocuments(parentPath string) ([]ShortDocument, err
 var mkDirErr = fmt.Errorf("mkdir")
 
 func (gs *GitStorage) CreateDocument(parentPath, title, content string) (Document, error) {
+	gs.writeMu.Lock()
+	defer gs.writeMu.Unlock()
+
 	id := gs.generateID(parentPath, title)
 	var fullPath string
 
@@ -269,10 +371,14 @@ func (gs *GitStorage) CreateDocument(parentPath, title, content string) (Documen
 		Content:  content,
 		Children: children,
 		Path:     newDocPath,
+		Modified: time.Now(),
 	}, nil
 }
 
 func (gs *GitStorage) UpdateDocument(docPath, title, content string, commitChanges bool) (Document, error) {
+	gs.writeMu.Lock()
+	defer gs.writeMu.Unlock()
+
 	fullPath := filepath.Join(gs.docsDir, filepath.FromSlash(docPath))
 	if _, err := os.Stat(fullPath); os.IsNotExist(err) {
 		return Document{}, fmt.Errorf("document not found")
@@ -290,19 +396,24 @@ func (gs *GitStorage) UpdateDocument(docPath, title, content string, commitChang
 			return Document{}, err
 		}
 		if err := os.Rename(
-			filepath.Join(gs.docsDir, docPath, oldTitle+".md"),
-			filepath.Join(gs.docsDir, docPath, title+".md"),
+			filepath.Join(gs.docsDir, filepath.FromSlash(docPath), oldTitle+".md"),
+			filepath.Join(gs.docsDir, filepath.FromSlash(docPath), title+".md"),
 		); err != nil {
 			return Document{}, err
 		}
 
-		newID := gs.generateID(docPath, title)
+		newID := gs.generateID(path.Dir(docPath), title)
 		newPath = filepath.Join(filepath.Dir(fullPath), newID)
 		if err := os.Rename(fullPath, newPath); err != nil {
+			// Roll back the .md rename to avoid leaving a half-applied state.
+			_ = os.Rename(
+				filepath.Join(gs.docsDir, filepath.FromSlash(docPath), title+".md"),
+				filepath.Join(gs.docsDir, filepath.FromSlash(docPath), oldTitle+".md"),
+			)
 			return Document{}, err
 		}
 		fullPath = newPath
-		docPath = path.Join(filepath.Dir(docPath), newID)
+		docPath = path.Join(path.Dir(docPath), newID)
 	}
 
 	docFilePath := filepath.Join(fullPath, title+".md")
@@ -327,10 +438,14 @@ func (gs *GitStorage) UpdateDocument(docPath, title, content string, commitChang
 		Content:  content,
 		Children: children,
 		Path:     docPath,
+		Modified: time.Now(),
 	}, nil
 }
 
 func (gs *GitStorage) DeleteDocument(path string) error {
+	gs.writeMu.Lock()
+	defer gs.writeMu.Unlock()
+
 	fullPath := filepath.Join(gs.docsDir, filepath.FromSlash(path))
 
 	hasChildren, err := gs.hasChildren(path)
@@ -352,7 +467,28 @@ func (gs *GitStorage) DeleteDocument(path string) error {
 	return nil
 }
 
+// DeleteDocumentRecursive deletes a document together with its whole subtree.
+func (gs *GitStorage) DeleteDocumentRecursive(path string) error {
+	gs.writeMu.Lock()
+	defer gs.writeMu.Unlock()
+
+	fullPath := filepath.Join(gs.docsDir, filepath.FromSlash(path))
+	if _, err := os.Stat(fullPath); os.IsNotExist(err) {
+		return fmt.Errorf("document not found")
+	}
+	if err := os.RemoveAll(fullPath); err != nil {
+		return err
+	}
+	if err := gs.commitChanges(fmt.Sprintf("Delete document (recursive): %s", path)); err != nil {
+		return fmt.Errorf("failed to commit changes: %w", err)
+	}
+	return nil
+}
+
 func (gs *GitStorage) MoveDocument(sourcePath, targetPath string) error {
+	gs.writeMu.Lock()
+	defer gs.writeMu.Unlock()
+
 	sourceFullPath := filepath.Join(gs.docsDir, filepath.FromSlash(sourcePath))
 	targetFullPath := filepath.Join(gs.docsDir, filepath.FromSlash(targetPath), filepath.Base(sourcePath))
 
@@ -395,19 +531,19 @@ func (gs *GitStorage) getDocuments(dir, parentPath string) ([]ShortDocument, err
 
 		id := f.Name()
 		docPath := path.Join(parentPath, id)
-		children, err := gs.getChildren(docPath)
+		title, hasChildren, err := gs.inspectDocDir(filepath.Join(gs.docsDir, filepath.FromSlash(docPath)))
 		if err != nil {
 			return nil, err
 		}
-		title, err := gs.getTitle(docPath)
-		if err != nil {
-			return nil, err
+		// A directory without a .md is not a document (empty/orphaned) — skip it.
+		if title == "" {
+			continue
 		}
 
 		docs = append(docs, ShortDocument{
 			ID:          id,
 			Title:       title,
-			HasChildren: len(children) > 0,
+			HasChildren: hasChildren,
 			Path:        docPath,
 		})
 	}
@@ -423,30 +559,40 @@ func (gs *GitStorage) getChildren(docPath string) ([]ShortDocument, error) {
 
 	var children []ShortDocument
 	for _, f := range files {
-		if f.IsDir() {
-			childTitle, err := os.ReadDir(filepath.Join(fullPath, f.Name()))
-			if err != nil {
-				return nil, err
-			}
-			var title string
-			var hasChildren bool
-
-			for _, ff := range childTitle {
-				if !ff.IsDir() {
-					title = strings.TrimSuffix(ff.Name(), ".md")
-				} else {
-					hasChildren = true
-				}
-			}
-			children = append(children, ShortDocument{
-				ID:          f.Name(),
-				Title:       title,
-				HasChildren: hasChildren,
-				Path:        path.Join(docPath, f.Name()),
-			})
+		if !f.IsDir() {
+			continue
 		}
+		childTitle, hasChildren, err := gs.inspectDocDir(filepath.Join(fullPath, f.Name()))
+		if err != nil {
+			return nil, err
+		}
+		children = append(children, ShortDocument{
+			ID:          f.Name(),
+			Title:       childTitle,
+			HasChildren: hasChildren,
+			Path:        path.Join(docPath, f.Name()),
+		})
 	}
 	return children, nil
+}
+
+// inspectDocDir returns the document title (the .md file name) and whether it
+// has child documents. Attachment files are ignored.
+func (gs *GitStorage) inspectDocDir(dir string) (title string, hasChildren bool, err error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return "", false, err
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			hasChildren = true
+			continue
+		}
+		if title == "" && strings.HasSuffix(e.Name(), ".md") {
+			title = strings.TrimSuffix(e.Name(), ".md")
+		}
+	}
+	return title, hasChildren, nil
 }
 
 func (gs *GitStorage) hasChildren(docPath string) (bool, error) {
@@ -465,39 +611,51 @@ func (gs *GitStorage) hasChildren(docPath string) (bool, error) {
 }
 
 func (gs *GitStorage) readDocument(docPath string) (*Document, error) {
-	files, err := os.ReadDir(filepath.Join(gs.docsDir, filepath.FromSlash(docPath)))
+	dir := filepath.Join(gs.docsDir, filepath.FromSlash(docPath))
+	files, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err
 	}
 
 	for _, f := range files {
-		if !f.IsDir() {
-			filePath := filepath.Join(gs.docsDir, filepath.FromSlash(docPath), f.Name())
-
-			info, err := os.Stat(filePath)
-			if err != nil {
-				return nil, err
-			}
-
-			children, err := gs.getChildren(docPath)
-			if err != nil {
-				return nil, err
-			}
-
-			data, err := os.ReadFile(filePath)
-			if err != nil {
-				return nil, err
-			}
-
-			return &Document{
-				ID:       filepath.Base(docPath),
-				Title:    strings.TrimSuffix(f.Name(), ".md"),
-				Content:  string(data),
-				Children: children,
-				Modified: info.ModTime(),
-				Path:     docPath,
-			}, nil
+		if f.IsDir() || !strings.HasSuffix(f.Name(), ".md") {
+			continue
 		}
+
+		filePath := filepath.Join(dir, f.Name())
+
+		info, err := os.Stat(filePath)
+		if err != nil {
+			return nil, err
+		}
+
+		children, err := gs.getChildren(docPath)
+		if err != nil {
+			return nil, err
+		}
+
+		data, err := os.ReadFile(filePath)
+		if err != nil {
+			return nil, err
+		}
+
+		attachments := make([]string, 0)
+		for _, entry := range files {
+			if entry.IsDir() || strings.HasSuffix(entry.Name(), ".md") {
+				continue
+			}
+			attachments = append(attachments, entry.Name())
+		}
+
+		return &Document{
+			ID:          filepath.Base(docPath),
+			Title:       strings.TrimSuffix(f.Name(), ".md"),
+			Content:     string(data),
+			Children:    children,
+			Attachments: attachments,
+			Modified:    info.ModTime(),
+			Path:        docPath,
+		}, nil
 	}
 
 	return nil, fmt.Errorf("document not found")
@@ -514,7 +672,7 @@ func (gs *GitStorage) generateID(parentPath, title string) string {
 	baseID := id
 	counter := 1
 	for {
-		fpath := filepath.Join(gs.docsDir, parentPath, id) // Теперь используем переданный baseDir
+		fpath := filepath.Join(gs.docsDir, parentPath, id) // Uses the passed baseDir.
 		if id != "root" {
 			if _, err := os.Stat(fpath); os.IsNotExist(err) {
 				break
@@ -532,12 +690,17 @@ func (gs *GitStorage) getTitle(path string) (string, error) {
 		return "", err
 	}
 	for _, f := range files {
-		if !f.IsDir() {
+		if !f.IsDir() && strings.HasSuffix(f.Name(), ".md") {
 			return strings.TrimSuffix(f.Name(), ".md"), nil
 		}
 	}
 
 	return "", fmt.Errorf("title not found")
+}
+
+// DocsDir returns the documents storage directory (data/docs).
+func (gs *GitStorage) DocsDir() string {
+	return gs.docsDir
 }
 
 func (gs *GitStorage) GetDocumentHistory(docPath string) (DocumentHistoryResponse, error) {
@@ -778,6 +941,9 @@ func (gs *GitStorage) GetHistoricalDocument(docPath, commitID string) (Document,
 }
 
 func (gs *GitStorage) RestoreHistoricalDocument(currentPath, originalPath, commitID string) (Document, error) {
+	gs.writeMu.Lock()
+	defer gs.writeMu.Unlock()
+
 	// Verify the commit exists
 	commitHash := plumbing.NewHash(commitID)
 	commit, err := gs.repo.CommitObject(commitHash)

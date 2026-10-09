@@ -1,0 +1,21 @@
+# Dependencies (installed inside the image)
+fe/node_modules/
+node_modules/
+
+# Build artifacts
+bin/
+fe/build/
+be/static/
+be/be2
+
+# Service data — must not end up in the image
+data/
+be/data/
+
+# VCS and local tooling
+.git/
+.github/
+.gitignore
+.vscode/
+.idea/
+*.log

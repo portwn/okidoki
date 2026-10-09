@@ -2,10 +2,16 @@ services:
   app:
     build:
       context: .
-      args:
-        - VERSION=latest  # или конкретный тег, например "v1.2.0"
+    image: okidoki:local
     ports:
+      # Trusted local network. To expose it only via a reverse proxy/Tailscale,
+      # replace with "127.0.0.1:8080:8080".
       - "8080:8080"
+    environment:
+      # Interface and search languages: "ru" or "en". Defaults to ru.
+      OKIDOKI_LANG: "ru"
+      # Max size of a single uploaded file (MiB). Defaults to 2048.
+      OKIDOKI_MAX_UPLOAD_MB: "2048"
     volumes:
       - ./data:/app/data
     restart: unless-stopped

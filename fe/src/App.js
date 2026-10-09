@@ -1,11 +1,13 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
-import { Editable, useEditor } from "@wysimark/react";
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
+import RichTextEditor from './editor/RichTextEditor';
+import { uploadFile, resolveAsset, configureAssets, setAttachments } from './editor/upload';
+import { fetchJSON, apiFetch, apiPath } from './api';
+import { useNotifications, NOTIFICATION_TYPES } from './hooks/useNotifications';
+import { useI18n, getLocale, translate } from './i18n';
 import { customAlphabet } from 'nanoid';
 import './App.css';
-// Импорт иконок из Radix UI
+// Icons from Radix UI.
 import {
     MagnifyingGlassIcon,
     StarIcon,
@@ -13,6 +15,8 @@ import {
     Pencil1Icon,
     FilePlusIcon,
     Cross1Icon,
+    Cross2Icon,
+    CrossCircledIcon,
     CheckIcon,
     ClockIcon,
     TrashIcon,
@@ -28,45 +32,43 @@ import {
 
 const nanoid = customAlphabet('1234567890abcdef', 10);
 
+const MIN_SIDEBAR_WIDTH = 150;
+const COLLAPSED_SIDEBAR_WIDTH = MIN_SIDEBAR_WIDTH / 4;
+
 const formatDocumentDate = (dateString) => {
-    if (!dateString) return 'Unknown date';
+    if (!dateString) return translate('doc.unknownDate');
 
-    try {
-        const date = new Date(dateString);
-        const day = date.getDate();
-        const month = date.toLocaleString('en-US', { month: 'long' });
-        const year = date.getFullYear();
+    const date = new Date(dateString);
+    if (Number.isNaN(date.getTime())) return String(dateString);
+    const day = date.getDate();
+    const month = date.toLocaleString(getLocale(), { month: 'long' });
+    const year = date.getFullYear();
 
-        return `${day} ${month} ${year}`;
-    } catch (e) {
-        return dateString || 'Unknown date';
-    }
+    return `${day} ${month} ${year}`;
 };
 
 const formatDocumentTime = (dateString) => {
     if (!dateString) return '';
 
-    try {
-        const date = new Date(dateString);
-        const hours = date.getHours().toString().padStart(2, '0');
-        const minutes = date.getMinutes().toString().padStart(2, '0');
+    const date = new Date(dateString);
+    if (Number.isNaN(date.getTime())) return '';
+    const hours = date.getHours().toString().padStart(2, '0');
+    const minutes = date.getMinutes().toString().padStart(2, '0');
 
-        return `${hours}:${minutes}`;
-    } catch (e) {
-        return '';
-    }
+    return `${hours}:${minutes}`;
 };
 
 const DocumentTree = ({
                           documents,
-                          currentDocPath, // Принимаем полный путь вместо ID
+                          currentDocPath, // Accept the full path instead of the ID
                           onSelect,
                           expandedNodes,
                           toggleExpand,
                           loadChildren,
                           loadingParents,
-                          onCreateNewDocument // Добавляем новый пропс
+                          onCreateNewDocument // New prop
                       }) => {
+    const { t } = useI18n();
     const renderDocuments = (docs, parentPath = []) => {
         if (!docs) return null;
 
@@ -92,16 +94,14 @@ const DocumentTree = ({
                                 await loadChildren(doc.id, path);
                             }
                         }}
-                        style={{ cursor: 'pointer' }}
                     >
-                        {isLoading ? '⌛' : doc.hasChildren ? (isExpanded ? <ChevronDownIcon /> : <ChevronRightIcon />) : <DotFilledIcon />}
+                        {isLoading ? <span className="spinner" /> : doc.hasChildren ? (isExpanded ? <ChevronDownIcon /> : <ChevronRightIcon />) : <DotFilledIcon />}
                     </span>
                         <span
                             className={`document-title ${isActive ? 'active' : ''}`}
                             onClick={() => {
                                 onSelect(doc.id, path);
                             }}
-                            style={{ cursor: 'pointer' }}
                         >
                         {doc.title}
                     </span>
@@ -118,12 +118,12 @@ const DocumentTree = ({
 
     return (
         <div className="document-tree">
-            {/* Добавляем кнопку создания нового документа */}
+            {/* New document button */}
             <div
                 className="new-document-button"
                 onClick={onCreateNewDocument}
             >
-                <FilePlusIcon /> New Document
+                <FilePlusIcon /> {t('common.newDocument')}
             </div>
             {renderDocuments(documents)}
         </div>
@@ -131,16 +131,17 @@ const DocumentTree = ({
 };
 
 const HistoryList = ({ history, selectedCommit, onSelect }) => {
+    const { t } = useI18n();
     return (
         <div className="history-list">
-            <h3>Document History</h3>
+            <h3>{t('history.title')}</h3>
             {history.map((commit) => (
                 <div
                     key={commit.commitHash}
                     className={`history-item ${selectedCommit === commit.commitHash ? 'selected' : ''}`}
                     onClick={() => onSelect(commit.commitHash)}
                 >
-                    <div className="commit-message">{commit.message || 'No commit message'}</div>
+                    <div className="commit-message">{commit.message || t('history.noCommitMessage')}</div>
                     <div className="commit-date">{formatDocumentDate(commit.date)}
                         <span className="time-part">, {formatDocumentTime(commit.date)}</span>
                     </div>
@@ -154,12 +155,13 @@ const HistoryList = ({ history, selectedCommit, onSelect }) => {
     );
 };
 
-const SearchResultsView = ({ results, currentPage, totalPages, onPageChange, query }) => {
+const SearchResultsView = ({ results, currentPage, totalPages, onPageChange, onSelect, query }) => {
+    const { t } = useI18n();
     return (
         <div className="search-results-container">
-            <h2>Search Results for "{query}"</h2>
+            <h2>{t('search.resultsFor', { query })}</h2>
             {results.length === 0 ? (
-                <p>No results found</p>
+                <p>{t('search.noResults')}</p>
             ) : (
                 <>
                     <div className="results-list">
@@ -169,8 +171,7 @@ const SearchResultsView = ({ results, currentPage, totalPages, onPageChange, que
                                 <div className="result-content">
                                     <h3
                                         className="result-title"
-                                        onClick={() => window.location.href = `/doc/${doc.path}`}
-                                        style={{ cursor: 'pointer'}}
+                                        onClick={() => onSelect(doc.path)}
                                     >
                                         {doc.title}
                                     </h3>
@@ -190,12 +191,12 @@ const SearchResultsView = ({ results, currentPage, totalPages, onPageChange, que
                                     onClick={() => onPageChange(currentPage - 1)}
                                     className="pagination-button"
                                 >
-                                    Previous
+                                    {t('search.previous')}
                                 </button>
                             )}
 
                             <span className="page-info">
-                                Page {currentPage} of {totalPages}
+                                {t('search.pageOf', { page: currentPage, total: totalPages })}
                             </span>
 
                             {currentPage < totalPages && (
@@ -203,7 +204,7 @@ const SearchResultsView = ({ results, currentPage, totalPages, onPageChange, que
                                     onClick={() => onPageChange(currentPage + 1)}
                                     className="pagination-button"
                                 >
-                                    Next
+                                    {t('search.next')}
                                 </button>
                             )}
                         </div>
@@ -215,9 +216,10 @@ const SearchResultsView = ({ results, currentPage, totalPages, onPageChange, que
 };
 
 const DraftsSection = ({ drafts, expanded, onToggle, loading, onDraftClick, onDeleteDraft }) => {
+    const { t } = useI18n();
     const handleDelete = (e, draftId) => {
-        e.stopPropagation(); // Предотвращаем срабатывание клика по черновику
-        if (window.confirm('Are you sure you want to delete this draft?')) {
+        e.stopPropagation(); // Prevent the draft click from firing.
+        if (window.confirm(t('confirm.deleteDraft'))) {
             onDeleteDraft(draftId);
         }
     };
@@ -225,40 +227,42 @@ const DraftsSection = ({ drafts, expanded, onToggle, loading, onDraftClick, onDe
     return (
         <div className="section-container drafts-section">
             <div className="section-header" onClick={onToggle}>
-                <h3><FileTextIcon className="section-icon" /> Drafts</h3>
-                <span className="toggle-icon">{expanded ? '▼' : '▶'}</span>
+                <h3><FileTextIcon className="section-icon" /> {t('sections.drafts')}</h3>
+                <span className="toggle-icon">{expanded ? <ChevronDownIcon /> : <ChevronRightIcon />}</span>
             </div>
             {expanded && (
                 <div className="section-content">
                     {loading ? (
-                        <div className="loading">Loading drafts...</div>
+                        <div className="loading">{t('loading.drafts')}</div>
                     ) : drafts.length === 0 ? (
-                        <div className="no-drafts">No drafts found</div>
+                        <div className="empty-section">{t('sections.noDrafts')}</div>
                     ) : (
                         drafts.map(draft => (
                             <div
                                 key={draft.id}
-                                className="favorite-item"
+                                className="section-item"
                                 onClick={() => onDraftClick(draft.id)}
                             >
-                                <div className="draft-content">
-                                    <div className="draft-title">{draft.title || 'Untitled Draft'}</div>
+                                <div className="section-item-main">
+                                    <div className="section-title">{draft.title || t('sections.untitledDraft')}</div>
                                     {draft.path && (
-                                        <div className="draft-path">
-                                            <span className="path-label">Path:</span> {draft.path}
+                                        <div className="section-path">
+                                            <span className="path-label">{t('sections.path')}</span> {draft.path}
                                         </div>
                                     )}
-                                    <div className="draft-date">{formatDocumentDate(draft.created_at)}
+                                    <div className="section-date">{formatDocumentDate(draft.created_at)}
                                         <span className="time-part">, {formatDocumentTime(draft.created_at)}</span>
                                     </div>
                                 </div>
-                                <div
-                                    className="draft-delete"
+                                <span
+                                    className="section-action"
                                     onClick={(e) => handleDelete(e, draft.id)}
-                                    title="Delete draft"
+                                    title={t('sections.deleteDraft')}
+                                    role="button"
+                                    aria-label={t('sections.deleteDraft')}
                                 >
-                                    🗑️
-                                </div>
+                                    <TrashIcon />
+                                </span>
                             </div>
                         ))
                     )}
@@ -275,35 +279,36 @@ const LastDocumentsSection = ({
                                   expanded,
                                   onToggle
                               }) => {
+    const { t } = useI18n();
     return (
-        <div className="last-documents-section">
+        <div className="section-container last-documents-section">
             <div className="section-header" onClick={onToggle}>
-                <h3><ClockIcon className="section-icon" /> Last Viewed</h3>
-                <span className="toggle-icon">{expanded ? '▼' : '▶'}</span>
+                <h3><ClockIcon className="section-icon" /> {t('sections.lastViewed')}</h3>
+                <span className="toggle-icon">{expanded ? <ChevronDownIcon /> : <ChevronRightIcon />}</span>
             </div>
             {expanded && (
-                <>
+                <div className="section-content">
                     {loading ? (
-                        <div className="loading">Loading last documents...</div>
+                        <div className="loading">{t('loading.last')}</div>
                     ) : documents.length === 0 ? (
-                        <div className="no-documents">No recent documents</div>
+                        <div className="empty-section">{t('sections.noRecent')}</div>
                     ) : (
-                        <div className="last-documents-list">
-                            {documents.map(doc => (
-                                <div
-                                    key={doc.id}
-                                    className="last-document-item"
-                                    onClick={() => onSelect(doc.path)}
-                                >
-                                    <div className="last-document-title">{doc.title}</div>
+                        documents.map(doc => (
+                            <div
+                                key={doc.id}
+                                className="section-item"
+                                onClick={() => onSelect(doc.path)}
+                            >
+                                <div className="section-item-main">
+                                    <div className="section-title">{doc.title}</div>
                                     {doc.path && (
-                                        <div className="last-document-path">{doc.path}</div>
+                                        <div className="section-path">{doc.path}</div>
                                     )}
                                 </div>
-                            ))}
-                        </div>
+                            </div>
+                        ))
                     )}
-                </>
+                </div>
             )}
         </div>
     );
@@ -317,6 +322,7 @@ const FavoritesSection = ({
                               onToggle,
                               onToggleFavorite
                           }) => {
+    const { t } = useI18n();
     const handleToggleFavorite = (e, path) => {
         e.stopPropagation();
         onToggleFavorite(path);
@@ -325,45 +331,97 @@ const FavoritesSection = ({
     return (
         <div className="section-container favorites-section">
             <div className="section-header" onClick={onToggle}>
-                <h3><StarFilledIcon className="section-icon" /> Favorites</h3>
-                <span className="toggle-icon">{expanded ? '▼' : '▶'}</span>
+                <h3><StarFilledIcon className="section-icon" /> {t('sections.favorites')}</h3>
+                <span className="toggle-icon">{expanded ? <ChevronDownIcon /> : <ChevronRightIcon />}</span>
             </div>
-            {expanded && documents !== null && (
-                <>
+            {expanded && (
+                <div className="section-content">
                     {loading ? (
-                        <div className="loading">Loading favorites...</div>
+                        <div className="loading">{t('loading.favorites')}</div>
                     ) : documents.length === 0 ? (
-                        <div className="no-documents">No favorite documents</div>
+                        <div className="empty-section">{t('sections.noFavorites')}</div>
                     ) : (
-                        <div className="favorites-list">
-                            {documents.map(doc => (
-                                <div
-                                    key={doc.id}
-                                    className="favorite-item"
-                                    onClick={() => onSelect(doc.path)}
-                                >
-                                    <div className="favorite-title">{doc.title}</div>
+                        documents.map(doc => (
+                            <div
+                                key={doc.id}
+                                className="section-item"
+                                onClick={() => onSelect(doc.path)}
+                            >
+                                <div className="section-item-main">
+                                    <div className="section-title">{doc.title}</div>
                                     {doc.path && (
-                                        <div className="favorite-path">{doc.path}</div>
+                                        <div className="section-path">{doc.path}</div>
                                     )}
-                                    <div
-                                        className="favorite-star"
-                                        onClick={(e) => handleToggleFavorite(e, doc.path)}
-                                        title="Remove from favorites"
-                                    >
-                                        ★
-                                    </div>
                                 </div>
-                            ))}
-                        </div>
+                                <span
+                                    className="section-action"
+                                    onClick={(e) => handleToggleFavorite(e, doc.path)}
+                                    title={t('sections.removeFavorite')}
+                                    role="button"
+                                    aria-label={t('sections.removeFavorite')}
+                                >
+                                    <StarFilledIcon />
+                                </span>
+                            </div>
+                        ))
                     )}
-                </>
+                </div>
             )}
         </div>
     );
 };
 
+// The set of root-page sections. On desktop "last/favorites" and "drafts"
+// are split into two columns; on mobile they stack.
+const RootSections = ({
+    lastDocuments, lastDocumentsLoading, lastDocumentsExpanded, onToggleLast,
+    favorites, favoritesLoading, favoritesExpanded, onToggleFavorites,
+    drafts, draftsExpanded, onToggleDrafts, draftsLoading, grouped,
+    onSelect, onToggleFavorite, onDraftClick, onDeleteDraft,
+}) => {
+    const last = (
+        <LastDocumentsSection
+            documents={lastDocuments}
+            loading={lastDocumentsLoading}
+            onSelect={onSelect}
+            expanded={lastDocumentsExpanded}
+            onToggle={onToggleLast}
+        />
+    );
+    const fav = (
+        <FavoritesSection
+            documents={favorites || []}
+            loading={favoritesLoading}
+            onSelect={onSelect}
+            expanded={favoritesExpanded}
+            onToggle={onToggleFavorites}
+            onToggleFavorite={onToggleFavorite}
+        />
+    );
+    const draftsEl = (
+        <DraftsSection
+            drafts={drafts}
+            expanded={draftsExpanded}
+            onToggle={onToggleDrafts}
+            loading={draftsLoading}
+            onDraftClick={onDraftClick}
+            onDeleteDraft={onDeleteDraft}
+        />
+    );
+
+    if (grouped) {
+        return (
+            <>
+                <div>{last}{fav}</div>
+                <div>{draftsEl}</div>
+            </>
+        );
+    }
+    return <>{last}{fav}{draftsEl}</>;
+};
+
 const NotificationPopup = ({ notifications, onClose }) => {
+    const { t } = useI18n();
     const [exitingIds, setExitingIds] = useState([]);
 
     const handleClose = (id) => {
@@ -378,19 +436,19 @@ const NotificationPopup = ({ notifications, onClose }) => {
 
     return (
         <div className="notification-popup-container">
-            {notifications.map((notification, index) => (
+            {notifications.map((notification) => (
                 <div
                     key={notification.id}
                     className={`notification-popup ${notification.type} ${exitingIds.includes(notification.id) ? 'exiting' : ''}`}
-                    style={{ bottom: `${index * 70 + 20}px` }}
                 >
                     <div className="notification-content">
                         <span className="notification-message">{notification.message}</span>
                         <button
                             className="notification-close"
                             onClick={() => handleClose(notification.id)}
+                            aria-label={t('common.close')}
                         >
-                            ×
+                            <Cross2Icon />
                         </button>
                     </div>
                 </div>
@@ -400,14 +458,7 @@ const NotificationPopup = ({ notifications, onClose }) => {
 };
 
 function App() {
-    const NOTIFICATION_TYPES = {
-        ERROR: 'error',
-        WARNING: 'warning'
-    };
-
-    const MIN_SIDEBAR_WIDTH = 150;
-    const COLLAPSED_SIDEBAR_WIDTH = MIN_SIDEBAR_WIDTH / 4;
-
+    const { t } = useI18n();
     const savedSidebarWidth = parseInt(localStorage.getItem('sidebarWidth')) || MIN_SIDEBAR_WIDTH;
     const savedSidebarCollapsed = localStorage.getItem('sidebarCollapsed') === 'true';
 
@@ -422,7 +473,7 @@ function App() {
     const [documents, setDocuments] = useState([]);
     const [currentDocument, setCurrentDocument] = useState(null);
     const [isLoading, setIsLoading] = useState(true);
-    const [notifications, setNotifications] = useState([]);
+    const { notifications, addNotification, removeNotification } = useNotifications();
     const [editMode, setEditMode] = useState(false);
     const [createMode, setCreateMode] = useState(false);
     const [editedTitle, setEditedTitle] = useState('');
@@ -434,6 +485,7 @@ function App() {
     const [searchError, setSearchError] = useState(null);
     const [historyMode, setHistoryMode] = useState(false);
     const [documentHistory, setDocumentHistory] = useState([]);
+    const [historicalDocument, setHistoricalDocument] = useState(null);
     const [selectedHistoryCommit, setSelectedHistoryCommit] = useState(null);
     const [showRestoreConfirm, setShowRestoreConfirm] = useState(false);
     const [saveStatus, setSaveStatus] = useState(null);
@@ -443,22 +495,47 @@ function App() {
     const navigate = useNavigate();
     const [searchParams] = useSearchParams();
     const menuRef = useRef(null);
-    const editor = useEditor({ authToken: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6InY5TThzVHVIelNEeUpNZ0cifQ.eyJpYXQiOjE3NTI1OTQ1ODQsImV4cCI6MTc4NDE1MjE4NH0.EuVn-5PbX7yD0cgPEWwC65P_z3YuoW2e6BLzsUoyogs" });
+    const editorRef = useRef(null);
+    const docPathRef = useRef('');
+    const draftIdRef = useRef(null);
+    const docRequestRef = useRef(0);
+    const relatedRequestRef = useRef(0);
+    const draftRequestRef = useRef(0);
+    const searchRequestRef = useRef(0);
+    const historyRequestRef = useRef(0);
+    const lastLoadRef = useRef(null);
+    const saveStatusTimerRef = useRef(null);
+
+    // Push the current path/draft into the attachments client (resolveAsset).
+    useEffect(() => {
+        docPathRef.current = currentDocument?.path || docPath || '';
+    }, [currentDocument, docPath]);
+
+    useEffect(() => {
+        configureAssets({
+            getDocPath: () => docPathRef.current,
+            getDraftId: () => draftIdRef.current,
+        });
+    }, []);
 
     const [draftId, setDraftId] = useState(null);
     const [prevTitle, setPrevTitle] = useState('');
     const [prevContent, setPrevContent] = useState('');
 
+    useEffect(() => {
+        draftIdRef.current = draftId;
+    }, [draftId]);
+
     // Mobile states
     const [isMobile, setIsMobile] = useState(window.innerWidth <= 768);
     const [showMobileMenu, setShowMobileMenu] = useState(false);
 
-    // Добавим в состояние компонента App
+    // Additional App component state.
     const [drafts, setDrafts] = useState([]);
     const [draftsExpanded, setDraftsExpanded] = useState(true);
     const [draftsLoading, setDraftsLoading] = useState(false);
 
-    // Добавим в состояние
+    // Additional state.
     const [lastDocuments, setLastDocuments] = useState([]);
     const [lastDocumentsLoading, setLastDocumentsLoading] = useState(false);
     const [lastDocumentsExpanded, setLastDocumentsExpanded] = useState(true);
@@ -486,62 +563,57 @@ function App() {
     }, [showMenu]);
 
     useEffect(() => {
-        // Режим редактирования
+        // Edit mode.
         if (editMode && currentDocument) {
             document.title = `*${currentDocument.title}`;
             return;
         }
 
-        // Режим создания
+        // Create mode.
         if (createMode) {
-            document.title = draftId ? '*Draft' : 'Create New Document';
+            document.title = draftId ? '*Draft' : t('editor.createNewDocument');
             return;
         }
 
-        // Результаты поиска
+        // Search results.
         if (searchResults) {
             const query = searchParams.get('q') || '';
-            document.title = `Search: "${query}"`;
+            document.title = t('search.windowTitle', { query });
             return;
         }
 
-        // Просмотр документа
+        // Document view.
         if (currentDocument) {
             document.title = `${currentDocument.title}`;
             return;
         }
 
-        // По умолчанию
+        // Default.
         document.title = 'Okidoki';
     }, [
         currentDocument,
         editMode,
         createMode,
-        historyMode,
         searchResults,
         searchParams,
-        isLoading,
-        draftId
+        draftId,
+        t
     ]);
 
-    // Функция для добавления ошибки
-    const addNotification = useCallback((message, type = NOTIFICATION_TYPES.ERROR) => {
-        const id = Date.now();
-        setNotifications(prev => [...prev, { id, message, type }]);
+    // Shows the save status, resetting the previous timer (an outdated
+    // timer would otherwise clear a fresh status).
+    const flashSaveStatus = useCallback((status) => {
+        if (saveStatusTimerRef.current) clearTimeout(saveStatusTimerRef.current);
+        setSaveStatus(status);
+        saveStatusTimerRef.current = setTimeout(() => {
+            saveStatusTimerRef.current = null;
+            setSaveStatus(null);
+        }, 2000);
+    }, []);
 
-        const timer = setTimeout(() => {
-            setNotifications(prev => prev.filter(n => n.id !== id));
-        }, 5000);
-
-        return () => clearTimeout(timer);
-    }, [NOTIFICATION_TYPES.ERROR]);
-
-    // Функция для удаления ошибки
-    const removeNotification = useCallback((errorId) => {
-        setNotifications(prev => prev.filter(error => error.id !== errorId));
-    }, []); // Аналогично, только setNotifications
-
-
+    useEffect(() => () => {
+        if (saveStatusTimerRef.current) clearTimeout(saveStatusTimerRef.current);
+    }, []);
 
     useEffect(() => {
         const handleResize = () => {
@@ -572,11 +644,9 @@ function App() {
         if (!currentDocument) return;
 
         try {
-            const response = await fetch(`/api/document/${currentDocument.path}`, {
+            await fetchJSON(`/api/document/${apiPath(currentDocument.path)}`, {
                 method: 'PUT',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     title: editedTitle,
                     content: markdown,
@@ -584,7 +654,6 @@ function App() {
                 })
             });
 
-            if (!response.ok) throw new Error('Failed to save draft');
             return true;
         } catch (err) {
             console.error('Error saving draft:', err);
@@ -600,22 +669,20 @@ function App() {
             const now = Date.now();
             if (now - lastSavedTime < 5000) return;
 
-            // Проверяем, были ли изменения
+            // Check whether there were changes.
             const hasChanges = editedTitle !== prevTitle || markdown !== prevContent;
             if (!hasChanges) return;
 
             try {
                 await saveDocumentDraft();
-                setSaveStatus('success');
+                flashSaveStatus('success');
                 setLastSavedTime(now);
-                // Обновляем предыдущие значения после сохранения
+                // Update the previous values after saving.
                 setPrevTitle(editedTitle);
                 setPrevContent(markdown);
-                setTimeout(() => setSaveStatus(null), 2000);
             } catch (err) {
-                setSaveStatus('error');
+                flashSaveStatus('error');
                 console.error('Auto-save failed:', err);
-                setTimeout(() => setSaveStatus(null), 2000);
             }
         };
 
@@ -624,7 +691,7 @@ function App() {
         return () => {
             clearTimeout(timer);
         };
-    }, [editMode, markdown, editedTitle, currentDocument, lastSavedTime, saveDocumentDraft, prevTitle, prevContent]);
+    }, [editMode, markdown, editedTitle, currentDocument, lastSavedTime, saveDocumentDraft, prevTitle, prevContent, flashSaveStatus]);
 
     const saveCreateDraft = useCallback(async () => {
         try {
@@ -635,11 +702,9 @@ function App() {
                 draftPath = currentDocument.path;
             }
 
-            const response = await fetch('/api/draft', {
+            await fetchJSON('/api/draft', {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     id: draftIdToSave,
                     title: editedTitle,
@@ -647,8 +712,6 @@ function App() {
                     path: draftPath
                 })
             });
-
-            if (!response.ok) throw new Error('Failed to save draft');
 
             if (!draftId) {
                 setDraftId(draftIdToSave);
@@ -668,24 +731,22 @@ function App() {
             const now = Date.now();
             if (now - lastSavedTime < 5000) return;
 
-            // Проверяем, были ли изменения
+            // Check whether there were changes.
             const hasChanges = editedTitle !== prevTitle || markdown !== prevContent;
             if (!hasChanges) return;
 
             try {
-                // Если draftId еще нет, сохраняем как новый черновик
+                // If there is no draftId yet, save as a new draft.
                 await saveCreateDraft();
 
-                setSaveStatus('success');
+                flashSaveStatus('success');
                 setLastSavedTime(now);
-                // Обновляем предыдущие значения после сохранения
+                // Update the previous values after saving.
                 setPrevTitle(editedTitle);
                 setPrevContent(markdown);
-                setTimeout(() => setSaveStatus(null), 2000);
             } catch (err) {
-                setSaveStatus('error');
+                flashSaveStatus('error');
                 console.error('Auto-save failed:', err);
-                setTimeout(() => setSaveStatus(null), 2000);
             }
         };
 
@@ -694,37 +755,37 @@ function App() {
         return () => {
             clearTimeout(timer);
         };
-    }, [createMode, markdown, editedTitle, lastSavedTime, saveCreateDraft, prevTitle, prevContent]);
+    }, [createMode, markdown, editedTitle, lastSavedTime, saveCreateDraft, prevTitle, prevContent, flashSaveStatus]);
 
     const performSearch = async (query, page = 1) => {
+        const reqId = ++searchRequestRef.current;
         try {
             setSearchLoading(true);
             setSearchError(null);
 
-            const response = await fetch(`/api/search?q=${encodeURIComponent(query)}&page=${page}&pageSize=10`);
-            if (!response.ok) throw new Error('Search failed');
-
-            const data = await response.json();
+            const data = await fetchJSON(`/api/search?q=${encodeURIComponent(query)}&page=${page}&pageSize=10`);
+            if (reqId !== searchRequestRef.current) return;
             setSearchResults(data);
         } catch (err) {
-            setSearchError(err.message);
+            if (reqId === searchRequestRef.current) setSearchError(err.message);
         } finally {
-            setSearchLoading(false);
+            if (reqId === searchRequestRef.current) setSearchLoading(false);
         }
     };
 
     const SaveStatusIndicator = ({ status }) => {
+        const { t: tr } = useI18n();
         if (!status) return null;
 
         return (
             <div className={`save-status ${status === 'success' ? 'success' : 'error'}`}>
                 {status === 'success' ? (
                     <>
-                        <span className="save-icon">💾</span> Saved
+                        <span className="save-icon"><CheckIcon /></span> {tr('status.saved')}
                     </>
                 ) : (
                     <>
-                        <span className="save-icon">❌💾</span> Save error
+                        <span className="save-icon"><CrossCircledIcon /></span> {tr('status.saveError')}
                     </>
                 )}
             </div>
@@ -763,9 +824,7 @@ function App() {
             setLoadingParents(prev => ({ ...prev, [pathKey]: true }));
 
             const parentPath = path.join('/');
-            const response = await fetch(`/api/documents/${parentPath}`);
-            if (!response.ok) throw new Error('Failed to load children');
-            const children = await response.json();
+            const children = await fetchJSON(`/api/documents/${apiPath(parentPath)}`);
 
             setDocuments(prevDocs => {
                 const updateChildren = (docs) => {
@@ -789,22 +848,18 @@ function App() {
     }, [addNotification]);
 
     const fetchRelatedDocuments = useCallback(async (docPath) => {
+        const reqId = ++relatedRequestRef.current;
         try {
             setIsLoading(true);
-            const endpoint = docPath ? `/api/related/${docPath}` : '/api/documents';
-            const response = await fetch(endpoint);
-            if (!response.ok) throw new Error('Failed to load related documents');
+            const endpoint = docPath ? `/api/related/${apiPath(docPath)}` : '/api/documents';
+            const rawData = await fetchJSON(endpoint);
+            if (reqId !== relatedRequestRef.current) return null;
+            const data = docPath ? rawData : { root: rawData };
 
-            let data = await response.json();
-
-            if (!docPath) {
-                data = { root: data };
-            }
-
-            // Создаем новый объект expandedNodes, сохраняя только корневой узел
+            // Build a fresh expandedNodes keeping only the root node.
             const newExpandedNodes = { 'root': true };
 
-            // Если есть docPath, раскрываем путь к текущему документу
+            // With a docPath, expand the path to the current document.
             if (docPath) {
                 const pathParts = docPath.split('/');
                 let currentPath = [];
@@ -848,61 +903,65 @@ function App() {
             setDocuments(mergedTree);
             return mergedTree;
         } catch (err) {
-            addNotification(err.message);
+            if (reqId === relatedRequestRef.current) addNotification(err.message);
             return null;
         } finally {
-            setIsLoading(false);
+            if (reqId === relatedRequestRef.current) setIsLoading(false);
         }
     }, [addNotification]);
 
     const fetchDraft = useCallback(async (draftId) => {
+        const reqId = ++draftRequestRef.current;
         try {
             setIsLoading(true);
-            const response = await fetch(`/api/draft/${draftId}`);
-            if (!response.ok) throw new Error('Failed to load draft');
+            const draft = await fetchJSON(`/api/draft/${apiPath(draftId)}`);
+            if (reqId !== draftRequestRef.current) return;
 
-            const draft = await response.json();
             setEditedTitle(draft.title);
             setMarkdown(draft.content);
             setPrevTitle(draft.title);
             setPrevContent(draft.content);
+            setAttachments(draft.attachments || []);
             setDraftId(draftId);
             setCreateMode(true);
             setCurrentDocument(null);
         } catch (err) {
-            addNotification(err.message);
+            if (reqId === draftRequestRef.current) addNotification(err.message);
         } finally {
-            setIsLoading(false);
+            if (reqId === draftRequestRef.current) setIsLoading(false);
         }
     }, [addNotification]);
 
     const fetchDocument = useCallback(async (pathSegments) => {
+        const reqId = ++docRequestRef.current;
         try {
             setIsLoading(true);
             const path = pathSegments.join('/');
 
-            const response = await fetch(`/api/document/${path}`);
-            if (!response.ok) throw new Error('Document not found');
-            const doc = await response.json();
+            const doc = await fetchJSON(`/api/document/${apiPath(path)}`);
+
+            // Ignore a stale response if we have already navigated elsewhere.
+            if (reqId !== docRequestRef.current) return null;
 
             setCurrentDocument(doc);
             setMarkdown(doc.content || '');
             setPrevTitle(doc.title);
             setPrevContent(doc.content || '');
+            setAttachments(doc.attachments || []);
 
             return doc;
         } catch (err) {
-            addNotification(err.message);
+            if (reqId === docRequestRef.current) addNotification(err.message);
             return null;
         } finally {
-            setIsLoading(false);
+            if (reqId === docRequestRef.current) setIsLoading(false);
         }
     }, [addNotification]);
 
     const saveDocument = useCallback(async () => {
         try {
             setIsLoading(true);
-            // Проверяем, есть ли изменения ИЛИ документ имеет uncommitted: true
+            // Check whether there are changes OR the document has uncommitted: true.
             const hasChanges = editedTitle !== prevTitle || markdown !== prevContent;
             const needsSave = hasChanges || currentDocument?.uncommitted;
 
@@ -912,11 +971,9 @@ function App() {
                 return;
             }
 
-            const response = await fetch(`/api/document/${currentDocument.path}`, {
+            const updatedDoc = await fetchJSON(`/api/document/${apiPath(currentDocument.path)}`, {
                 method: 'PUT',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     title: editedTitle,
                     content: markdown,
@@ -924,35 +981,28 @@ function App() {
                 })
             });
 
-            if (!response.ok) throw new Error('Failed to save');
-
-            const updatedDoc = await response.json();
             setCurrentDocument(updatedDoc);
             setEditMode(false);
-            setSaveStatus('success');
-            // Обновляем предыдущие значения после сохранения
+            flashSaveStatus('success');
+            // Update the previous values after saving.
             setPrevTitle(editedTitle);
             setPrevContent(markdown);
-            setTimeout(() => setSaveStatus(null), 2000);
 
             await fetchRelatedDocuments(updatedDoc.path);
             navigateToDocumentPath(updatedDoc.path.split('/'));
         } catch (err) {
             addNotification(err.message);
-            setSaveStatus('error');
-            setTimeout(() => setSaveStatus(null), 2000);
+            flashSaveStatus('error');
         } finally {
             setIsLoading(false);
         }
-    }, [currentDocument, editedTitle, markdown, prevTitle, prevContent, fetchRelatedDocuments, navigateToDocumentPath, addNotification]);
+    }, [currentDocument, editedTitle, markdown, prevTitle, prevContent, fetchRelatedDocuments, navigateToDocumentPath, addNotification, flashSaveStatus]);
 
-    // Функция для загрузки черновиков
+    // Load drafts.
     const fetchDrafts = useCallback(async () => {
         try {
             setDraftsLoading(true);
-            const response = await fetch('/api/drafts');
-            if (!response.ok) throw new Error('Failed to load drafts');
-            const data = await response.json();
+            const data = await fetchJSON('/api/drafts');
             setDrafts(data);
         } catch (err) {
             addNotification(err.message);
@@ -965,34 +1015,27 @@ function App() {
         if (!draftId) return;
 
         try {
-            const response = await fetch(`/api/draft/${draftId}`, {
+            await fetchJSON(`/api/draft/${apiPath(draftId)}`, {
                 method: 'DELETE'
             });
 
-            if (!response.ok) {
-                const errorData = await response.json();
-                throw new Error(errorData.message || 'Failed to delete draft');
-            }
-
-            // Обновляем список черновиков после удаления
+            // Refresh the draft list after deletion.
             await fetchDrafts();
-            setSaveStatus('success');
-            setTimeout(() => setSaveStatus(null), 2000);
+            flashSaveStatus('success');
         } catch (err) {
             addNotification(err.message);
-            setSaveStatus('error');
-            setTimeout(() => setSaveStatus(null), 2000);
+            flashSaveStatus('error');
         }
-    }, [fetchDrafts, addNotification]);
+    }, [fetchDrafts, addNotification, flashSaveStatus]);
 
     const createDocument = useCallback(async () => {
         try {
             setIsLoading(true);
 
-            // Определяем parentPath
+            // Determine parentPath.
             let parentPath = docPath || '';
 
-            // Если у нас есть draftId, берем путь из черновика
+            // With a draftId, take the path from the draft.
             if (draftId) {
                 const draft = drafts.find(d => d.id === draftId);
                 if (draft?.path) {
@@ -1002,38 +1045,35 @@ function App() {
 
             let url = '/api/document';
             const body = {
-                title: editedTitle || 'New Document',
+                title: editedTitle || t('common.newDocument'),
                 content: markdown
             };
 
-            // Добавляем parentPath только если он есть
+            // Add parentPath only when present.
             if (parentPath) {
                 body.parentPath = parentPath;
             }
 
-            // Если черновик существует, добавляем его ID в запрос
+            // If the draft exists, add its ID to the request.
             if (draftId) {
-                url += `?draft=${draftId}`;
+                url += `?draft=${encodeURIComponent(draftId)}`;
             }
 
-            const response = await fetch(url, {
+            const response = await apiFetch(url, {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(body)
             });
 
             if (response.status === 202) {
-                addNotification('Parent directory not found, created in root', NOTIFICATION_TYPES.WARNING);
+                addNotification(t('notify.parentNotFound'), NOTIFICATION_TYPES.WARNING);
             }
-
-            if (!response.ok) throw new Error('Failed to create document');
 
             const newDoc = await response.json();
 
             navigateToDocumentPath(newDoc.path.split('/'));
             setCurrentDocument(newDoc);
+            setAttachments(newDoc.attachments || []);
             setCreateMode(false);
             setDraftId(null);
 
@@ -1049,20 +1089,54 @@ function App() {
         } finally {
             setIsLoading(false);
         }
-    }, [NOTIFICATION_TYPES.WARNING, draftId, editedTitle, markdown, docPath, drafts, navigateToDocumentPath, addNotification]);
+    }, [draftId, editedTitle, markdown, docPath, drafts, navigateToDocumentPath, addNotification, t]);
 
-    const deleteDocument = useCallback(async () => {
+    // Ctrl/Cmd+S — save the current document or create a new one.
+    useEffect(() => {
+        const onKeyDown = (e) => {
+            if (!(e.ctrlKey || e.metaKey) || e.shiftKey || e.altKey) return;
+            if (e.key.toLowerCase() !== 's') return;
+            if (editMode) {
+                e.preventDefault();
+                saveDocument();
+            } else if (createMode) {
+                e.preventDefault();
+                createDocument();
+            }
+        };
+        window.addEventListener('keydown', onKeyDown);
+        return () => window.removeEventListener('keydown', onKeyDown);
+    }, [editMode, createMode, saveDocument, createDocument]);
+
+    // Pressing ArrowUp at the very start of the document scrolls the area up
+    // to bring the title back while staying in the editor.
+    const handleEditorKeyDown = useCallback((e) => {
+        if (e.key !== 'ArrowUp') return;
+        const editor = editorRef.current?.getEditor?.();
+        const atStart = !editor || (editor.state.selection.empty && editor.state.selection.from <= 1);
+        if (!atStart) return;
+        // At the start of the document align the inner scroll, otherwise the top padding
+        // (between the toolbar and the first line) stays hidden.
+        const inner = e.currentTarget.querySelector('.rte-editor');
+        if (inner && inner.scrollTop > 0) inner.scrollTop = 0;
+        const container = e.currentTarget.closest('.edit-container');
+        if (!container || container.scrollTop <= 0) return;
+        e.preventDefault();
+        container.scrollTop = Math.max(0, container.scrollTop - 48);
+    }, []);
+
+    const deleteDocument = useCallback(async (recursive = false) => {
         if (!currentDocument) return;
 
         try {
             setIsLoading(true);
             const parentPath = currentDocument.path.split('/').slice(0, -1).join('/');
 
-            const response = await fetch(`/api/document/${currentDocument.path}`, {
-                method: 'DELETE'
-            });
+            const url = recursive
+                ? `/api/document/${apiPath(currentDocument.path)}?recursive=true`
+                : `/api/document/${apiPath(currentDocument.path)}`;
 
-            if (!response.ok) throw new Error('Failed to delete document');
+            await fetchJSON(url, { method: 'DELETE' });
 
             await fetchRelatedDocuments(parentPath || '');
 
@@ -1081,35 +1155,24 @@ function App() {
         }
     }, [currentDocument, navigate, navigateToDocumentPath, fetchRelatedDocuments, addNotification]);
 
-    const moveDocument = useCallback(async (targetId) => {
-        if (!currentDocument || !targetId) return;
+    const moveDocument = useCallback(async (targetPath) => {
+        if (!currentDocument || targetPath === null || targetPath === undefined) return;
 
         try {
             setIsLoading(true);
-            const targetDocResponse = await fetch(`/api/document/${targetId}`);
-            if (!targetDocResponse.ok) throw new Error('Target folder not found');
-            const targetDoc = await targetDocResponse.json();
-
-            const response = await fetch(`/api/document/${currentDocument.path}/move`, {
+            const moved = await fetchJSON(`/api/document/${apiPath(currentDocument.path)}/move`, {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    targetPath: targetDoc.path
-                })
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ targetPath })
             });
-
-            if (!response.ok) throw new Error('Failed to move document');
-
-            await fetchRelatedDocuments(targetDoc.path);
-
-            const newPath = targetDoc.path.split('/');
-            newPath.push(currentDocument.id);
-            navigateToDocumentPath(newPath);
 
             setShowMoveModal(false);
             setShowMenu(false);
+            setMoveTargetId(null);
+
+            await fetchRelatedDocuments(targetPath || '');
+            navigateToDocumentPath(moved.path.split('/'));
+            setCurrentDocument(moved);
         } catch (err) {
             addNotification(err.message);
         } finally {
@@ -1118,21 +1181,25 @@ function App() {
     }, [currentDocument, navigateToDocumentPath, fetchRelatedDocuments, addNotification]);
 
     const startCreateNewDocument = useCallback(() => {
-        setDraftId(null); // Сбрасываем draftId
+        // Generate the id immediately so attachments can target the draft staging folder.
+        setDraftId(nanoid());
         setEditedTitle('');
         setPrevTitle('');
         setMarkdown('');
         setPrevContent('');
+        setAttachments([]);
         setCreateMode(true);
         setCurrentDocument(null);
-        // Очищаем выделение в редакторе
-        if (editor) {
-            editor.selection = null;
-            // Transforms.deselect(editor);
-        }
-    }, [editor]);
+        setShowMobileMenu(false);
+        editorRef.current?.clearSelection();
+    }, []);
 
     const cancelCreate = useCallback(() => {
+        const id = draftIdRef.current;
+        if (id) {
+            // The draft may have been auto-saved — delete it on the server; errors do not matter.
+            fetchJSON(`/api/draft/${apiPath(id)}`, { method: 'DELETE' }).catch(() => {});
+        }
         setCreateMode(false);
         setDraftId(null);
         if (docPath) {
@@ -1156,10 +1223,8 @@ function App() {
 
         try {
             setIsLoading(true);
-            const response = await fetch(`/api/history/tree/${currentDocument.path}`);
-            if (!response.ok) throw new Error('Failed to load history');
+            const history = await fetchJSON(`/api/history/tree/${apiPath(currentDocument.path)}`);
 
-            const history = await response.json();
             setDocumentHistory(history.history);
             setHistoryMode(true);
 
@@ -1175,42 +1240,39 @@ function App() {
     };
 
     const loadHistoricalDocument = async (commitHash) => {
-        if (!commitHash) return;
+        if (!commitHash || !currentDocument) return;
+        const reqId = ++historyRequestRef.current;
 
         try {
             setIsLoading(true);
-            const response = await fetch(`/api/history/doc/${currentDocument.path}/${commitHash}`);
-            if (!response.ok) throw new Error('Failed to load historical document');
+            const doc = await fetchJSON(`/api/history/doc/${apiPath(currentDocument.path)}/${encodeURIComponent(commitHash)}`);
+            if (reqId !== historyRequestRef.current) return;
 
-            const doc = await response.json();
             setSelectedHistoryCommit(commitHash);
-            setCurrentDocument(doc);
+            setHistoricalDocument(doc);
         } catch (err) {
-            addNotification(err.message);
+            if (reqId === historyRequestRef.current) addNotification(err.message);
         } finally {
-            setIsLoading(false);
+            if (reqId === historyRequestRef.current) setIsLoading(false);
         }
     };
 
     const restoreHistoricalVersion = async () => {
+        if (!currentDocument) return;
         try {
             setIsLoading(true);
-            const response = await fetch(`/api/history/restore/${currentDocument.path}`, {
+            const restoredDoc = await fetchJSON(`/api/history/restore/${apiPath(currentDocument.path)}`, {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     commitHash: selectedHistoryCommit,
                     originalPath: currentDocument.path
                 })
             });
 
-            if (!response.ok) throw new Error('Failed to restore document');
-
-            const restoredDoc = await response.json();
             setHistoryMode(false);
             setSelectedHistoryCommit(null);
+            setHistoricalDocument(null);
             setCurrentDocument(restoredDoc);
             setShowRestoreConfirm(false);
 
@@ -1226,7 +1288,8 @@ function App() {
     const exitHistoryMode = () => {
         setHistoryMode(false);
         setSelectedHistoryCommit(null);
-        fetchDocument(currentDocument.path.split('/'));
+        setHistoricalDocument(null);
+        if (currentDocument) fetchDocument(currentDocument.path.split('/'));
     };
 
     const enterEditMode = useCallback(() => {
@@ -1234,12 +1297,19 @@ function App() {
         setPrevTitle(currentDocument?.title || '');
         setPrevContent(currentDocument?.content || '');
         setEditMode(true);
-        if (editor) {
-            editor.selection = null;
-        }
-    }, [currentDocument, editor]);
+        editorRef.current?.clearSelection();
+    }, [currentDocument]);
 
     const exitEditMode = () => {
+        // Discard edits: restore content/title from the server so a pending
+        // auto-save does not apply the discarded changes.
+        if (currentDocument) {
+            setEditedTitle(currentDocument.title || '');
+            setPrevTitle(currentDocument.title || '');
+            setMarkdown(currentDocument.content || '');
+            setPrevContent(currentDocument.content || '');
+        }
+        setSaveStatus(null);
         setEditMode(false);
     };
 
@@ -1257,8 +1327,12 @@ function App() {
 
     const handleDeleteClick = () => {
         setShowMenu(false);
-        if (window.confirm('Are you sure you want to delete this document?')) {
-            deleteDocument();
+        const hasChildren = currentDocument?.children?.length > 0;
+        const message = hasChildren
+            ? t('confirm.deleteWithChildren')
+            : t('confirm.deleteDocument');
+        if (window.confirm(message)) {
+            deleteDocument(hasChildren);
         }
     };
 
@@ -1297,7 +1371,7 @@ function App() {
                 localStorage.setItem('sidebarWidth', newWidth)
             }
         }
-    }, [isDragging, isSidebarCollapsed, MIN_SIDEBAR_WIDTH, COLLAPSED_SIDEBAR_WIDTH, prevSidebarWidth]);
+    }, [isDragging, isSidebarCollapsed, prevSidebarWidth]);
 
     useEffect(() => {
         document.addEventListener('mousemove', onDrag);
@@ -1335,20 +1409,11 @@ function App() {
                 className="breadcrumb-link"
                 onClick={(e) => {
                     e.preventDefault();
-                    setCurrentDocument(null);
-                    setSearchResults(null);
-                    setEditMode(false);
-                    setCreateMode(false);
-                    setHistoryMode(false);
-                    navigate('/');
-                    fetchRelatedDocuments('');
-                    fetchDrafts();
-                    fetchLastDocuments();
-                    fetchFavorites();
+                    handleHomeClick();
                 }}
-                title="Home"
+                title={t('common.home')}
             >
-                <HomeIcon style={{ width: 16, height: 16 }} />
+                <HomeIcon />
             </a>
         </span>
         );
@@ -1384,9 +1449,7 @@ function App() {
     const fetchLastDocuments = useCallback(async () => {
         try {
             setLastDocumentsLoading(true);
-            const response = await fetch('/api/views/last');
-            if (!response.ok) throw new Error('Failed to load last documents');
-            const data = await response.json();
+            const data = await fetchJSON('/api/views/last');
             setLastDocuments(data);
         } catch (err) {
             addNotification(err.message);
@@ -1398,11 +1461,8 @@ function App() {
     const fetchFavorites = useCallback(async () => {
         try {
             setFavoritesLoading(true);
-            const response = await fetch('/api/favorites');
-            if (!response.ok) throw new Error('Failed to load favorites');
-
-            const data = await response.json();
-            setFavorites(data || []); // Если null, сохраняем пустой массив
+            const data = await fetchJSON('/api/favorites');
+            setFavorites(data || []); // If null, keep an empty array.
         } catch (err) {
             addNotification(err.message);
         } finally {
@@ -1411,11 +1471,21 @@ function App() {
     }, [addNotification]);
 
     useEffect(() => {
+        if (searchParams.get('q')) return;
+
+        // Dedup: StrictMode in dev (and any re-renders with the same route)
+        // must not send a duplicate document request.
+        const key = docPath || '';
+        if (lastLoadRef.current === key) return;
+        lastLoadRef.current = key;
+
         const loadData = async () => {
-            if (docPath && !searchParams.get('q')) {
-                await fetchDocument(docPath.split('/'));
-                await fetchRelatedDocuments(docPath);
-            } else if (!docPath && !searchParams.get('q')) {
+            if (docPath) {
+                const doc = await fetchDocument(docPath.split('/'));
+                if (doc) await fetchRelatedDocuments(docPath);
+            } else {
+                // Cancel a possibly pending document fetch so it does not navigate us back.
+                docRequestRef.current++;
                 await fetchRelatedDocuments('');
                 await fetchDrafts();
                 await fetchLastDocuments();
@@ -1434,22 +1504,18 @@ function App() {
         try {
             setIsLoading(true);
             let docToToggle
-            currentDocument ? docToToggle = currentDocument: docToToggle = { path: targetPath, favorite: true }; // Для избранных на корневой странице
+            currentDocument ? docToToggle = currentDocument: docToToggle = { path: targetPath, favorite: true }; // For favorites on the root page.
 
             const method = docToToggle.favorite ? 'DELETE' : 'POST';
-            const response = await fetch('/api/favorite', {
+            await fetchJSON('/api/favorite', {
                 method,
-                headers: {
-                    'Content-Type': 'application/json',
-                },
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     path: docToToggle.path
                 })
             });
 
-            if (!response.ok) throw new Error('Failed to update favorite status');
-
-            // Обновляем состояние документа, если это текущий документ
+            // Update document state when it is the current document.
             if (docToToggle.path && currentDocument) {
                 setCurrentDocument(prev => ({
                     ...prev,
@@ -1457,7 +1523,7 @@ function App() {
                 }));
             }
 
-            // Обновляем документ в дереве
+            // Update the document in the tree.
             setDocuments(prevDocs => {
                 const updateFavorite = (docs) => {
                     return docs.map(doc => {
@@ -1473,7 +1539,7 @@ function App() {
                 return updateFavorite(prevDocs);
             });
 
-            // Обновляем список избранного
+            // Refresh the favorites list.
             await fetchFavorites();
 
         } catch (err) {
@@ -1499,29 +1565,29 @@ function App() {
                     }
                 }
 
-                // Сбрасываем режимы редактирования/создания
+                // Reset edit/create modes.
                 setEditMode(false);
                 setCreateMode(false);
                 setDraftId(null);
 
-                // Переходим к новому документу
+                // Navigate to the new document.
                 navigateToDocumentPath(pathSegments);
                 if (isMobile) setShowMobileMenu(false);
             } catch (err) {
-                addNotification('Failed to save draft: ' + err.message);
+                addNotification(t('notify.failedSaveDraft', { message: err.message }));
             } finally {
                 setIsLoading(false);
             }
             return;
         }
 
-        // Обычный переход, если не в режиме редактирования/создания
+        // Normal navigation when not in edit/create mode.
         navigateToDocumentPath(pathSegments);
         if (isMobile) setShowMobileMenu(false);
-    }, [editMode, createMode, saveDocumentDraft, saveCreateDraft, navigateToDocumentPath, isMobile, addNotification, editedTitle, markdown, prevContent, prevTitle]);
+    }, [editMode, createMode, saveDocumentDraft, saveCreateDraft, navigateToDocumentPath, isMobile, addNotification, editedTitle, markdown, prevContent, prevTitle, t]);
 
     const handleHomeClick = useCallback(async () => {
-        // Если в режиме редактирования/создания - проверяем изменения перед сохранением
+        // In edit/create mode, check for changes before saving.
         if (editMode || createMode) {
             try {
                 const hasChanges = editMode
@@ -1538,26 +1604,26 @@ function App() {
                     }
                 }
 
-                // Сбрасываем состояния
-                // // Переходим на домашнюю страницу
+                // Reset state.
+                // Go to the home page.
                 setCurrentDocument(null);
                 setSearchResults(null);
                 setEditMode(false);
                 setCreateMode(false);
                 setHistoryMode(false);
                 setDraftId(null);
-                // Переходим к новому документу
+                // Navigate to the new document.
                 navigate('/', { replace: true });
 
             } catch (err) {
-                addNotification('Failed to save draft: ' + err.message);
+                addNotification(t('notify.failedSaveDraft', { message: err.message }));
             } finally {
                 setIsLoading(false);
             }
             return;
         }
 
-        // Обычный переход, если не в режиме редактирования/создания
+        // Normal navigation when not in edit/create mode.
         const isAlreadyAtRoot = !docPath && !currentDocument && !searchResults &&
             !editMode && !createMode && !historyMode;
 
@@ -1575,7 +1641,7 @@ function App() {
     }, [
         editedTitle, markdown, prevContent, prevTitle,
         editMode, createMode, saveDocumentDraft, saveCreateDraft,
-        navigate, docPath, currentDocument, searchResults, historyMode, addNotification, fetchDrafts
+        navigate, docPath, currentDocument, searchResults, historyMode, addNotification, fetchDrafts, t
     ]);
 
     const renderContent = () => {
@@ -1586,6 +1652,7 @@ function App() {
                     currentPage={searchResults.currentPage}
                     totalPages={searchResults.totalPages}
                     onPageChange={handlePageChange}
+                    onSelect={(path) => navigateToDocumentPath(path.split('/'))}
                     query={searchParams.get('q')}
                 />
             );
@@ -1597,16 +1664,16 @@ function App() {
             return (
                 <div className="edit-container">
                     <div className="edit-header">
-                        <h2>{currentDraft ? 'Edit Draft' : 'Create New Document'}</h2>
+                        <h2>{currentDraft ? t('sections.editDraft') : t('editor.createNewDocument')}</h2>
                         {currentDraft && (
                             <div className="draft-info">
                                 <div>
-                                    Editing draft (saved {formatDocumentDate(currentDraft.created_at)})
+                                    {t('editor.draftSavedAt', { date: formatDocumentDate(currentDraft.created_at) })}
                                     <span className="time-part">, {formatDocumentTime(currentDraft.created_at)}</span>
                                 </div>
                                 {currentDraft.path && (
                                     <div className="draft-location">
-                                        <span className="path-label">Location:</span> {currentDraft.path}
+                                        <span className="path-label">{t('sections.location')}</span> {currentDraft.path}
                                     </div>
                                 )}
                             </div>
@@ -1617,13 +1684,17 @@ function App() {
                         className="title-input"
                         value={editedTitle}
                         onChange={(e) => setEditedTitle(e.target.value)}
-                        placeholder="Document title"
+                        placeholder={t('editor.titlePlaceholder')}
                     />
-                    <div className="editor-wrapper">
-                        <Editable
-                            editor={editor}
+                    <div className="editor-wrapper" onKeyDown={handleEditorKeyDown}>
+                        <RichTextEditor
+                            ref={editorRef}
                             value={markdown}
                             onChange={setMarkdown}
+                            onUploadFile={uploadFile}
+                            onUploadError={(err) => addNotification(err.message || t('editor.uploadFailed'))}
+                            resolveAsset={resolveAsset}
+                            placeholder={t('editor.placeholder')}
                         />
                     </div>
                 </div>
@@ -1636,13 +1707,17 @@ function App() {
                         className="title-input"
                         value={editedTitle}
                         onChange={(e) => setEditedTitle(e.target.value)}
-                        placeholder="Document title"
+                        placeholder={t('editor.titlePlaceholder')}
                     />
-                    <div className="editor-wrapper">
-                        <Editable
-                            editor={editor}
+                    <div className="editor-wrapper" onKeyDown={handleEditorKeyDown}>
+                        <RichTextEditor
+                            ref={editorRef}
                             value={markdown}
                             onChange={setMarkdown}
+                            onUploadFile={uploadFile}
+                            onUploadError={(err) => addNotification(err.message || t('editor.uploadFailed'))}
+                            resolveAsset={resolveAsset}
+                            placeholder={t('editor.placeholder')}
                         />
                     </div>
                 </div>
@@ -1652,12 +1727,14 @@ function App() {
                 <>
                     <div className="view-mode-header">
                         {renderBreadcrumbs()}
-                        <h1>{currentDocument?.title}</h1>
+                        <h1>{historicalDocument?.title || currentDocument?.title}</h1>
                     </div>
                     <div className="markdown-viewer">
-                        <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                            {currentDocument?.content || ''}
-                        </ReactMarkdown>
+                        <RichTextEditor
+                            editable={false}
+                            value={historicalDocument?.content || ''}
+                            resolveAsset={resolveAsset}
+                        />
                     </div>
                 </>
             );
@@ -1666,63 +1743,25 @@ function App() {
                 <>
                     {!currentDocument ? (
                         <div className={isMobile ? "root-page-mobile" : "root-page-desktop"}>
-                            {isMobile ? (
-                                <>
-                                    <LastDocumentsSection
-                                        documents={lastDocuments}
-                                        loading={lastDocumentsLoading}
-                                        onSelect={(path) => navigateToDocumentPath(path.split('/'))}
-                                        expanded={lastDocumentsExpanded}
-                                        onToggle={() => setLastDocumentsExpanded(!lastDocumentsExpanded)}
-                                    />
-                                    <FavoritesSection
-                                        documents={favorites || []}
-                                        loading={favoritesLoading}
-                                        onSelect={(path) => navigateToDocumentPath(path.split('/'))}
-                                        expanded={favoritesExpanded}
-                                        onToggle={() => setFavoritesExpanded(!favoritesExpanded)}
-                                        onToggleFavorite={toggleFavorite}
-                                    />
-                                    <DraftsSection
-                                        drafts={drafts}
-                                        expanded={draftsExpanded}
-                                        onToggle={() => setDraftsExpanded(!draftsExpanded)}
-                                        loading={draftsLoading}
-                                        onDraftClick={fetchDraft}
-                                        onDeleteDraft={deleteDraft}
-                                    />
-                                </>
-                            ) : (
-                                <>
-                                    <div>
-                                        <LastDocumentsSection
-                                            documents={lastDocuments}
-                                            loading={lastDocumentsLoading}
-                                            onSelect={(path) => navigateToDocumentPath(path.split('/'))}
-                                            expanded={lastDocumentsExpanded}
-                                            onToggle={() => setLastDocumentsExpanded(!lastDocumentsExpanded)}
-                                        />
-                                        <FavoritesSection
-                                            documents={favorites || []}
-                                            loading={favoritesLoading}
-                                            onSelect={(path) => navigateToDocumentPath(path.split('/'))}
-                                            expanded={favoritesExpanded}
-                                            onToggle={() => setFavoritesExpanded(!favoritesExpanded)}
-                                            onToggleFavorite={toggleFavorite}
-                                        />
-                                    </div>
-                                    <div>
-                                        <DraftsSection
-                                            drafts={drafts}
-                                            expanded={draftsExpanded}
-                                            onToggle={() => setDraftsExpanded(!draftsExpanded)}
-                                            loading={draftsLoading}
-                                            onDraftClick={fetchDraft}
-                                            onDeleteDraft={deleteDraft}
-                                        />
-                                    </div>
-                                </>
-                            )}
+                            <RootSections
+                                grouped={!isMobile}
+                                lastDocuments={lastDocuments}
+                                lastDocumentsLoading={lastDocumentsLoading}
+                                lastDocumentsExpanded={lastDocumentsExpanded}
+                                onToggleLast={() => setLastDocumentsExpanded(!lastDocumentsExpanded)}
+                                favorites={favorites || []}
+                                favoritesLoading={favoritesLoading}
+                                favoritesExpanded={favoritesExpanded}
+                                onToggleFavorites={() => setFavoritesExpanded(!favoritesExpanded)}
+                                drafts={drafts}
+                                draftsExpanded={draftsExpanded}
+                                onToggleDrafts={() => setDraftsExpanded(!draftsExpanded)}
+                                draftsLoading={draftsLoading}
+                                onSelect={(path) => navigateToDocumentPath(path.split('/'))}
+                                onToggleFavorite={toggleFavorite}
+                                onDraftClick={fetchDraft}
+                                onDeleteDraft={deleteDraft}
+                            />
                         </div>
                     ) : (
                         <>
@@ -1737,20 +1776,20 @@ function App() {
                                     </span>
                                         {currentDocument.uncommitted && (
                                             <span className="uncommitted-changes">
-                                            • Have unsaved changes
+                                            {t('doc.unsavedChanges')}
                                         </span>
                                         )}
                                     </div>
                                 )}
                             </div>
 
-                            {/* Измененная часть для отображения содержимого документа */}
+                            {/* Content block */}
                             {(!currentDocument?.content || currentDocument.content.trim() === '') ? (
                                 <div className="empty-document">
-                                    <div className="no-content">No content</div>
+                                    <div className="no-content">{t('doc.noContent')}</div>
                                     {currentDocument?.children && (
                                         <div className="children-section">
-                                            <h3>Child documents:</h3>
+                                            <h3>{t('doc.childDocuments')}</h3>
                                             <div className="children-list">
                                                 {currentDocument.children.map(child => (
                                                     <div
@@ -1771,9 +1810,11 @@ function App() {
                                 </div>
                             ) : (
                                 <div className="markdown-viewer">
-                                    <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                                        {currentDocument.content}
-                                    </ReactMarkdown>
+                                    <RichTextEditor
+                                        editable={false}
+                                        value={currentDocument.content}
+                                        resolveAsset={resolveAsset}
+                                    />
                                 </div>
                             )}
                         </>
@@ -1784,31 +1825,31 @@ function App() {
     };
 
     if (isLoading && documents !== null && !documents.length && !searchResults) {
-        return <div className="loading">Loading...</div>;
+        return <div className="loading">{t('loading.generic')}</div>;
     }
 
     return (
         <div className="app-container">
             <NotificationPopup notifications={notifications} onClose={removeNotification} />
             <header className="app-header">
-                <div className="header-left">
-                    <div className="logo-placeholder" onClick={toggleSidebar}>
+                <div className="header-left" onClick={toggleSidebar}>
+                    <div className="logo-placeholder">
                         {isSidebarCollapsed && !isMobile ? (
                             <ChevronRightIcon />
                         ) : (
                             <img
                                 src="/white_s.png"
                                 alt="Home"
-                                style={{
-                                    width: "40px",
-                                    height: "40px",
-                                    borderRadius: "50%",
-                                    objectFit: "cover",
-                                }}
                             />
                         )}
                     </div>
-                    <h1 className="app-title" onClick={handleHomeClick}>
+                    <h1
+                        className="app-title"
+                        onClick={(e) => {
+                            e.stopPropagation();
+                            handleHomeClick();
+                        }}
+                    >
                         Okidoki
                     </h1>
                 </div>
@@ -1817,7 +1858,7 @@ function App() {
                     <form onSubmit={handleSearch} className="search-form">
                         <input
                             type="text"
-                            placeholder="Search..."
+                            placeholder={t('search.placeholder')}
                             value={searchQuery}
                             onChange={(e) => setSearchQuery(e.target.value)}
                             className="search-input"
@@ -1833,7 +1874,7 @@ function App() {
                         <button
                             className={`favorite-button ${currentDocument.favorite ? 'favorited' : ''}`}
                             onClick={toggleFavorite}
-                            title={currentDocument.favorite ? 'Remove from favorites' : 'Add to favorites'}
+                            title={currentDocument.favorite ? t('sections.removeFavorite') : t('doc.addToFavorites')}
                         >
                             {currentDocument.favorite ? <StarFilledIcon /> : <StarIcon />}
                         </button>
@@ -1848,15 +1889,15 @@ function App() {
                                 onClick={exitHistoryMode}
                                 disabled={isLoading}
                             >
-                                <Cross1Icon /> {!isMobile && 'Cancel'}
+                                <Cross1Icon /> {!isMobile && t('common.cancel')}
                             </button>
                             <button
                                 className="save-button"
                                 onClick={() => setShowRestoreConfirm(true)}
                                 disabled={isLoading || !selectedHistoryCommit}
                             >
-                                {isLoading ? 'Restoring...' : <CheckIcon />}
-                                {!isMobile && 'Restore'}
+                                {isLoading ? t('status.restoring') : <CheckIcon />}
+                                {!isMobile && t('common.restore')}
                             </button>
                         </>
                     ) : createMode ? (
@@ -1866,15 +1907,15 @@ function App() {
                                 onClick={cancelCreate}
                                 disabled={isLoading}
                             >
-                                <Cross1Icon /> {!isMobile && 'Cancel'}
+                                <Cross1Icon /> {!isMobile && t('common.cancel')}
                             </button>
                             <button
                                 className="save-button"
                                 onClick={createDocument}
                                 disabled={isLoading}
                             >
-                                {isLoading ? 'Creating...' : <CheckIcon />}
-                                {!isMobile && 'Create'}
+                                {isLoading ? t('status.creating') : <CheckIcon />}
+                                {!isMobile && t('common.create')}
                             </button>
                         </>
                     ) : editMode ? (
@@ -1884,15 +1925,15 @@ function App() {
                                 onClick={exitEditMode}
                                 disabled={isLoading}
                             >
-                                <Cross1Icon /> {!isMobile && 'Cancel'}
+                                <Cross1Icon /> {!isMobile && t('common.cancel')}
                             </button>
                             <button
                                 className="save-button"
                                 onClick={saveDocument}
                                 disabled={isLoading}
                             >
-                                {isLoading ? 'Saving...' : <CheckIcon />}
-                                {!isMobile && 'Save'}
+                                {isLoading ? t('status.saving') : <CheckIcon />}
+                                {!isMobile && t('common.save')}
                             </button>
                         </>
                     ) : (
@@ -1904,7 +1945,7 @@ function App() {
                                 disabled={!currentDocument}
                             >
                                 <Pencil1Icon />
-                                {!isMobile && 'Edit'}
+                                {!isMobile && t('common.edit')}
                             </button>)
                             }
                             <button
@@ -1912,7 +1953,7 @@ function App() {
                                 onClick={startCreateNewDocument}
                             >
                                 <FilePlusIcon />
-                                {!isMobile && 'Create'}
+                                {!isMobile && t('common.create')}
                             </button>
                         </>
                     )}
@@ -1934,20 +1975,20 @@ function App() {
                                                 className="dropdown-item"
                                                 onClick={handleHistoryClick}
                                             >
-                                                <ClockIcon /> History
+                                                <ClockIcon /> {t('common.history')}
                                             </div>
                                             <div
                                                 className="dropdown-item"
                                                 onClick={handleMoveClick}
                                             >
-                                                <MoveIcon /> Move
+                                                <MoveIcon /> {t('common.move')}
                                             </div>
                                             {!currentDocument.hasChildren && (
                                                 <div
                                                     className="dropdown-item danger"
                                                     onClick={handleDeleteClick}
                                                 >
-                                                    <TrashIcon /> Delete
+                                                    <TrashIcon /> {t('common.delete')}
                                                 </div>
                                             )}
                                         </>
@@ -1958,7 +1999,7 @@ function App() {
                                         rel="noopener noreferrer"
                                         className="dropdown-item github-link"
                                     >
-                                        <GitHubLogoIcon /> GitHub
+                                        <GitHubLogoIcon /> {t('common.github')}
                                     </a>
                                 </div>
                             )}
@@ -1970,18 +2011,21 @@ function App() {
                 {showMoveModal && (
                     <div className="modal-overlay">
                         <div className="modal">
-                            <h2>Move Document</h2>
-                            <p>Select new parent folder for "{currentDocument?.title}"</p>
+                            <h2>{t('move.title')}</h2>
+                            <p>{t('move.selectParent', { title: currentDocument?.title })}</p>
                             <div className="move-tree-container">
                                 <DocumentTree
                                     documents={documents}
                                     currentDocPath={currentDocument?.path}
-                                    onSelect={handleDocumentSelect}
+                                    onSelect={(_id, path) => setMoveTargetId(path.join('/'))}
                                     expandedNodes={expandedNodes}
                                     toggleExpand={toggleExpand}
                                     loadChildren={loadChildren}
                                     loadingParents={loadingParents}
-                                    onCreateNewDocument={startCreateNewDocument} // Передаем обработчик
+                                    onCreateNewDocument={() => {
+                                        setShowMoveModal(false);
+                                        startCreateNewDocument();
+                                    }}
                                 />
                             </div>
                             <div className="modal-buttons">
@@ -1992,14 +2036,14 @@ function App() {
                                         setMoveTargetId(null);
                                     }}
                                 >
-                                    Cancel
+                                    {t('common.cancel')}
                                 </button>
                                 <button
                                     className="confirm-button"
                                     onClick={() => moveDocument(moveTargetId)}
                                     disabled={!moveTargetId || isLoading}
                                 >
-                                    {isLoading ? 'Moving...' : 'Move'}
+                                    {isLoading ? t('status.moving') : t('common.move')}
                                 </button>
                             </div>
                         </div>
@@ -2009,21 +2053,21 @@ function App() {
                 {showRestoreConfirm && (
                     <div className="modal-overlay">
                         <div className="modal">
-                            <h2>Restore File State?</h2>
-                            <p>The current state of the file will be saved in the history</p>
+                            <h2>{t('restore.title')}</h2>
+                            <p>{t('restore.body')}</p>
                             <div className="modal-buttons">
                                 <button
                                     className="cancel-button"
                                     onClick={() => setShowRestoreConfirm(false)}
                                 >
-                                    Cancel
+                                    {t('common.cancel')}
                                 </button>
                                 <button
                                     className="confirm-button"
                                     onClick={restoreHistoricalVersion}
                                     disabled={isLoading}
                                 >
-                                    {isLoading ? 'Restoring...' : 'OK'}
+                                    {isLoading ? t('status.restoring') : t('common.ok')}
                                 </button>
                             </div>
                         </div>
@@ -2042,7 +2086,7 @@ function App() {
                         onClick={handleSidebarClick}
                     >
                         {isSidebarCollapsed && !isMobile ? (
-                            <div className="collapsed-sidebar-indicator">→</div>
+                            <div className="collapsed-sidebar-indicator"><ChevronRightIcon /></div>
                         ) : historyMode ? (
                             <HistoryList
                                 history={documentHistory}
@@ -2050,7 +2094,7 @@ function App() {
                                 onSelect={loadHistoricalDocument}
                             />
                         ) : isLoading ? (
-                            <div className="loading">Loading...</div>
+                            <div className="loading">{t('loading.generic')}</div>
                         ) : (
                             <DocumentTree
                                 documents={documents}
@@ -2060,27 +2104,23 @@ function App() {
                                 toggleExpand={toggleExpand}
                                 loadChildren={loadChildren}
                                 loadingParents={loadingParents}
-                                onCreateNewDocument={startCreateNewDocument} // Передаем обработчик
+                                onCreateNewDocument={startCreateNewDocument} // Pass the handler.
                             />
                         )}
                     </div>
 
                     {!isMobile && (
                         <div
-                            className="divider"
+                            className={`divider${isSidebarCollapsed ? ' is-hidden' : ''}`}
                             onMouseDown={startDrag}
-                            style={{
-                                display: isSidebarCollapsed ? 'none' : 'block',
-                                cursor: isSidebarCollapsed ? 'default' : 'col-resize'
-                            }}
                         />
                     )}
 
-                    <div className="content">
+                    <div className={editMode || createMode ? 'content content-editing' : 'content'}>
                         {searchLoading ? (
-                            <div className="loading">Searching...</div>
+                            <div className="loading">{t('loading.searching')}</div>
                         ) : searchError ? (
-                            <div className="error">Search error: {searchError}</div>
+                            <div className="error">{t('search.error', { message: searchError })}</div>
                         ) : (
                             renderContent()
                         )}
