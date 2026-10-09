@@ -2,9 +2,8 @@
 
 **[Русская версия →](README.md)**
 
-**A home knowledge base that fits entirely in one folder on your disk.**
-Markdown notes in a tree, full-text search, attachments and version history — all
-running on your own server, with no cloud and no subscription.
+**A self-hosted home knowledge base that stores everything as plain Markdown files — no database required.**
+Markdown notes in a tree, full-text search, attachments and version history.
 
 ![Okidoki home page](docs/screenshots/en/root.png)
 
@@ -17,6 +16,9 @@ script, or kept in your own git repository.
 
 The server is a single Go binary that serves the web UI and stores the data. It
 starts with a single Docker command.
+
+In spirit it is a lightweight alternative to Confluence: the same tree-based wiki,
+but without the heaviness or extra features — tuned for personal use.
 
 ## Why you might want it
 
