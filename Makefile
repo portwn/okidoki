@@ -1,3 +1,7 @@
+# Static binaries: pure-Go deps need no CGO, and static linking runs on both
+# glibc and musl (Alpine) — the release linux/amd64 asset must be static.
+export CGO_ENABLED=0
+
 run-fe:
 	@echo "Starting frontend..."
 	cd fe && npm start
