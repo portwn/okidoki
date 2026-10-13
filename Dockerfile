@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # --- Frontend: build the CRA static bundle ---
-FROM node:20 AS frontend
+FROM node:20-alpine AS frontend
 WORKDIR /fe
 COPY fe/package.json fe/package-lock.json ./
 RUN npm ci
@@ -9,7 +9,8 @@ COPY fe/ ./
 RUN npm run build
 
 # --- Backend: build the binary with the embedded static bundle ---
-FROM golang:1.24 AS backend
+# CGO is off; all deps are pure Go, so the musl (Alpine) toolchain is not needed.
+FROM golang:1.24-alpine AS backend
 WORKDIR /be
 COPY be/ ./
 # //go:embed static/* requires a non-empty directory — drop the built SPA in.

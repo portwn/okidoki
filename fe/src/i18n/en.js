@@ -67,8 +67,8 @@ export default {
     'doc.unknownDate': 'Unknown date',
     'doc.addToFavorites': 'Add to favorites',
     'doc.unsavedChanges': '• Have unsaved changes',
-    'doc.noContent': 'No content',
-    'doc.childDocuments': 'Child documents:',
+    'doc.noContent': 'This document is not written yet',
+    'doc.childDocuments': 'Child documents',
 
     // Editor
     'editor.placeholder': 'Start typing…',
@@ -79,6 +79,7 @@ export default {
 
     // Move modal
     'move.title': 'Move Document',
+    'move.root': 'Root',
     'move.selectParent': 'Select new parent folder for "{title}"',
 
     // Restore modal
@@ -87,6 +88,7 @@ export default {
 
     // Notifications
     'notify.parentNotFound': 'Parent directory not found, created in root',
+    'notify.draftNotFound': 'Draft not found',
     'notify.failedSaveDraft': 'Failed to save draft: {message}',
 
     // Toolbar

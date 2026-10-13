@@ -67,8 +67,8 @@ export default {
     'doc.unknownDate': 'Дата неизвестна',
     'doc.addToFavorites': 'Добавить в избранное',
     'doc.unsavedChanges': '• Есть несохранённые изменения',
-    'doc.noContent': 'Нет содержимого',
-    'doc.childDocuments': 'Дочерние документы:',
+    'doc.noContent': 'Документ пока не написан',
+    'doc.childDocuments': 'Дочерние документы',
 
     // Editor
     'editor.placeholder': 'Начните печатать…',
@@ -79,6 +79,7 @@ export default {
 
     // Move modal
     'move.title': 'Перемещение документа',
+    'move.root': 'Корень',
     'move.selectParent': 'Выберите новую папку для "{title}"',
 
     // Restore modal
@@ -87,6 +88,7 @@ export default {
 
     // Notifications
     'notify.parentNotFound': 'Родительская папка не найдена, документ создан в корне',
+    'notify.draftNotFound': 'Черновик не найден',
     'notify.failedSaveDraft': 'Не удалось сохранить черновик: {message}',
 
     // Toolbar

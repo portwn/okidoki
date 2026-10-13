@@ -195,6 +195,7 @@ const RichTextEditor = forwardRef(function RichTextEditor({
 
     useImperativeHandle(ref, () => ({
         focus: () => editor?.chain().focus().run(),
+        focusStart: () => editor?.chain().focus('start').run(),
         setContent: (markdown) =>
             editor?.commands.setContent(markdown || '', { contentType: 'markdown', emitUpdate: false }),
         clearSelection: () => editor?.commands.blur(),

@@ -626,7 +626,11 @@ func (h *DocumentHandler) GetDraftDocument(w http.ResponseWriter, r *http.Reques
 	vars := mux.Vars(r)
 	draft, err := h.draftStorage.GetDraft(vars["rest"])
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+		status := http.StatusNotFound
+		if errors.Is(err, ErrInvalidDraftID) {
+			status = http.StatusBadRequest
+		}
+		http.Error(w, err.Error(), status)
 		return
 	}
 	if entries, err := os.ReadDir(filepath.Join(h.draftStorage.Dir(), sanitizeSegment(vars["rest"]))); err == nil {
@@ -677,7 +681,11 @@ func (h *DocumentHandler) UpsertDraftDocument(w http.ResponseWriter, r *http.Req
 func (h *DocumentHandler) DeleteDraftDocument(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	if err := h.draftStorage.DeleteDraft(vars["rest"]); err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+		status := http.StatusInternalServerError
+		if errors.Is(err, ErrInvalidDraftID) {
+			status = http.StatusBadRequest
+		}
+		http.Error(w, err.Error(), status)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

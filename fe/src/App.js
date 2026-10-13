@@ -61,12 +61,16 @@ const formatDocumentTime = (dateString) => {
 const DocumentTree = ({
                           documents,
                           currentDocPath, // Accept the full path instead of the ID
+                          selectedPath = null, // Highlighted move target
                           onSelect,
                           expandedNodes,
                           toggleExpand,
                           loadChildren,
                           loadingParents,
-                          onCreateNewDocument // New prop
+                          onCreateNewDocument,
+                          showCreateButton = true,
+                          showRootOption = false, // Move modal: allow moving to root
+                          rootDisabled = false, // Source already at root
                       }) => {
     const { t } = useI18n();
     const renderDocuments = (docs, parentPath = []) => {
@@ -79,10 +83,14 @@ const DocumentTree = ({
             const isLoading = loadingParents[pathKey];
             const docFullPath = path.join('/');
             const isActive = currentDocPath === docFullPath;
+            const isSelected = selectedPath !== null && docFullPath === selectedPath;
 
             return (
                 <div key={doc.id} style={{ marginLeft: `${(path.length - 1) * 15}px` }}>
-                    <div className="document-item">
+                    <div
+                        className={`document-item${isActive ? ' active' : ''}${isSelected ? ' selected' : ''}`}
+                        onClick={() => onSelect(doc.id, path)}
+                    >
                     <span
                         className="icon"
                         onClick={async (e) => {
@@ -97,12 +105,7 @@ const DocumentTree = ({
                     >
                         {isLoading ? <span className="spinner" /> : doc.hasChildren ? (isExpanded ? <ChevronDownIcon /> : <ChevronRightIcon />) : <DotFilledIcon />}
                     </span>
-                        <span
-                            className={`document-title ${isActive ? 'active' : ''}`}
-                            onClick={() => {
-                                onSelect(doc.id, path);
-                            }}
-                        >
+                        <span className={`document-title ${isActive ? 'active' : ''}`}>
                         {doc.title}
                     </span>
                     </div>
@@ -118,13 +121,25 @@ const DocumentTree = ({
 
     return (
         <div className="document-tree">
-            {/* New document button */}
-            <div
-                className="new-document-button"
-                onClick={onCreateNewDocument}
-            >
-                <FilePlusIcon /> {t('common.newDocument')}
-            </div>
+            {showCreateButton && (
+                <div
+                    className="new-document-button"
+                    onClick={() => onCreateNewDocument()}
+                >
+                    <FilePlusIcon /> {t('common.newDocument')}
+                </div>
+            )}
+            {showRootOption && (
+                <div
+                    className={`document-item root-item${selectedPath === '' ? ' selected' : ''}${rootDisabled ? ' disabled' : ''}`}
+                    onClick={() => {
+                        if (!rootDisabled) onSelect('', []);
+                    }}
+                >
+                    <span className="icon"><HomeIcon /></span>
+                    <span className="document-title">{t('move.root')}</span>
+                </div>
+            )}
             {renderDocuments(documents)}
         </div>
     );
@@ -521,6 +536,8 @@ function App() {
     const [draftId, setDraftId] = useState(null);
     const [prevTitle, setPrevTitle] = useState('');
     const [prevContent, setPrevContent] = useState('');
+    // Parent folder for the document being created (sidebar -> '', header -> current doc).
+    const [createParentPath, setCreateParentPath] = useState('');
 
     useEffect(() => {
         draftIdRef.current = draftId;
@@ -696,11 +713,6 @@ function App() {
     const saveCreateDraft = useCallback(async () => {
         try {
             const draftIdToSave = draftId || nanoid();
-            let draftPath = docPath || '';
-
-            if (currentDocument) {
-                draftPath = currentDocument.path;
-            }
 
             await fetchJSON('/api/draft', {
                 method: 'POST',
@@ -709,7 +721,7 @@ function App() {
                     id: draftIdToSave,
                     title: editedTitle,
                     content: markdown,
-                    path: draftPath
+                    path: createParentPath
                 })
             });
 
@@ -722,7 +734,7 @@ function App() {
             addNotification(err.message);
             throw err;
         }
-    }, [draftId, editedTitle, markdown, docPath, currentDocument, addNotification]);
+    }, [draftId, editedTitle, markdown, createParentPath, addNotification]);
 
     useEffect(() => {
         if (!createMode) return;
@@ -923,14 +935,17 @@ function App() {
             setPrevContent(draft.content);
             setAttachments(draft.attachments || []);
             setDraftId(draftId);
+            setCreateParentPath(draft.path || '');
             setCreateMode(true);
             setCurrentDocument(null);
         } catch (err) {
-            if (reqId === draftRequestRef.current) addNotification(err.message);
+            if (reqId === draftRequestRef.current) {
+                addNotification(err.message === 'draft not found' ? t('notify.draftNotFound') : err.message);
+            }
         } finally {
             if (reqId === draftRequestRef.current) setIsLoading(false);
         }
-    }, [addNotification]);
+    }, [addNotification, t]);
 
     const fetchDocument = useCallback(async (pathSegments) => {
         const reqId = ++docRequestRef.current;
@@ -1028,20 +1043,32 @@ function App() {
         }
     }, [fetchDrafts, addNotification, flashSaveStatus]);
 
+    const handleDeleteDraftClick = useCallback(async () => {
+        const id = draftIdRef.current;
+        if (!id || !window.confirm(t('confirm.deleteDraft'))) return;
+
+        setShowMenu(false);
+        await deleteDraft(id);
+
+        // The draft is gone — leave the create flow.
+        setCreateMode(false);
+        setDraftId(null);
+        setCreateParentPath('');
+        setEditedTitle('');
+        setPrevTitle('');
+        setMarkdown('');
+        setPrevContent('');
+        setAttachments([]);
+        setCurrentDocument(null);
+        navigate('/', { replace: true });
+    }, [deleteDraft, navigate, t]);
+
     const createDocument = useCallback(async () => {
         try {
             setIsLoading(true);
 
-            // Determine parentPath.
-            let parentPath = docPath || '';
-
-            // With a draftId, take the path from the draft.
-            if (draftId) {
-                const draft = drafts.find(d => d.id === draftId);
-                if (draft?.path) {
-                    parentPath = draft.path;
-                }
-            }
+            // The parent is fixed when the create flow started (root or current doc).
+            const parentPath = createParentPath;
 
             let url = '/api/document';
             const body = {
@@ -1076,6 +1103,7 @@ function App() {
             setAttachments(newDoc.attachments || []);
             setCreateMode(false);
             setDraftId(null);
+            setCreateParentPath('');
 
             if (parentPath) {
                 const pathKey = parentPath.split('/').join('-');
@@ -1089,24 +1117,32 @@ function App() {
         } finally {
             setIsLoading(false);
         }
-    }, [draftId, editedTitle, markdown, docPath, drafts, navigateToDocumentPath, addNotification, t]);
+    }, [draftId, editedTitle, markdown, createParentPath, navigateToDocumentPath, addNotification, t]);
 
     // Ctrl/Cmd+S — save the current document or create a new one.
+    // Always swallowed: outside edit/create modes there is nothing to save,
+    // and the browser's "save page" dialog is never wanted here.
     useEffect(() => {
         const onKeyDown = (e) => {
             if (!(e.ctrlKey || e.metaKey) || e.shiftKey || e.altKey) return;
             if (e.key.toLowerCase() !== 's') return;
+            e.preventDefault();
             if (editMode) {
-                e.preventDefault();
                 saveDocument();
             } else if (createMode) {
-                e.preventDefault();
                 createDocument();
             }
         };
         window.addEventListener('keydown', onKeyDown);
         return () => window.removeEventListener('keydown', onKeyDown);
     }, [editMode, createMode, saveDocument, createDocument]);
+
+    // Tab in the title moves the caret into the beginning of the document body.
+    const handleTitleKeyDown = useCallback((e) => {
+        if (e.key !== 'Tab' || e.shiftKey || e.ctrlKey || e.metaKey || e.altKey) return;
+        e.preventDefault();
+        editorRef.current?.focusStart?.();
+    }, []);
 
     // Pressing ArrowUp at the very start of the document scrolls the area up
     // to bring the title back while staying in the editor.
@@ -1180,7 +1216,7 @@ function App() {
         }
     }, [currentDocument, navigateToDocumentPath, fetchRelatedDocuments, addNotification]);
 
-    const startCreateNewDocument = useCallback(() => {
+    const startCreateNewDocument = useCallback((parentPath = '') => {
         // Generate the id immediately so attachments can target the draft staging folder.
         setDraftId(nanoid());
         setEditedTitle('');
@@ -1188,6 +1224,7 @@ function App() {
         setMarkdown('');
         setPrevContent('');
         setAttachments([]);
+        setCreateParentPath(parentPath);
         setCreateMode(true);
         setCurrentDocument(null);
         setShowMobileMenu(false);
@@ -1202,6 +1239,7 @@ function App() {
         }
         setCreateMode(false);
         setDraftId(null);
+        setCreateParentPath('');
         if (docPath) {
             fetchDocument(docPath.split('/'));
         } else {
@@ -1552,9 +1590,7 @@ function App() {
     const handleDocumentSelect = useCallback(async (id, pathSegments) => {
         if (editMode || createMode) {
             try {
-                const hasChanges = editMode
-                    ? editedTitle !== prevTitle || markdown !== prevContent
-                    : editedTitle || markdown;
+                const hasChanges = editedTitle !== prevTitle || markdown !== prevContent;
 
                 if (hasChanges) {
                     setIsLoading(true);
@@ -1569,6 +1605,7 @@ function App() {
                 setEditMode(false);
                 setCreateMode(false);
                 setDraftId(null);
+                setCreateParentPath('');
 
                 // Navigate to the new document.
                 navigateToDocumentPath(pathSegments);
@@ -1590,9 +1627,7 @@ function App() {
         // In edit/create mode, check for changes before saving.
         if (editMode || createMode) {
             try {
-                const hasChanges = editMode
-                    ? editedTitle !== prevTitle || markdown !== prevContent
-                    : editedTitle || markdown;
+                const hasChanges = editedTitle !== prevTitle || markdown !== prevContent;
 
                 if (hasChanges) {
                     setIsLoading(true);
@@ -1612,6 +1647,7 @@ function App() {
                 setCreateMode(false);
                 setHistoryMode(false);
                 setDraftId(null);
+                setCreateParentPath('');
                 // Navigate to the new document.
                 navigate('/', { replace: true });
 
@@ -1684,6 +1720,7 @@ function App() {
                         className="title-input"
                         value={editedTitle}
                         onChange={(e) => setEditedTitle(e.target.value)}
+                        onKeyDown={handleTitleKeyDown}
                         placeholder={t('editor.titlePlaceholder')}
                     />
                     <div className="editor-wrapper" onKeyDown={handleEditorKeyDown}>
@@ -1707,6 +1744,7 @@ function App() {
                         className="title-input"
                         value={editedTitle}
                         onChange={(e) => setEditedTitle(e.target.value)}
+                        onKeyDown={handleTitleKeyDown}
                         placeholder={t('editor.titlePlaceholder')}
                     />
                     <div className="editor-wrapper" onKeyDown={handleEditorKeyDown}>
@@ -1786,8 +1824,10 @@ function App() {
                             {/* Content block */}
                             {(!currentDocument?.content || currentDocument.content.trim() === '') ? (
                                 <div className="empty-document">
-                                    <div className="no-content">{t('doc.noContent')}</div>
-                                    {currentDocument?.children && (
+                                    <div className="no-content">
+                                        <FileTextIcon /> {t('doc.noContent')}
+                                    </div>
+                                    {currentDocument?.children?.length > 0 && (
                                         <div className="children-section">
                                             <h3>{t('doc.childDocuments')}</h3>
                                             <div className="children-list">
@@ -1801,7 +1841,9 @@ function App() {
                                                             if (isMobile) setShowMobileMenu(false);
                                                         }}
                                                     >
-                                                        {child.title}
+                                                        <span className="child-icon"><FileTextIcon /></span>
+                                                        <span className="child-title">{child.title}</span>
+                                                        <span className="child-chevron"><ChevronRightIcon /></span>
                                                     </div>
                                                 ))}
                                             </div>
@@ -1950,7 +1992,7 @@ function App() {
                             }
                             <button
                                 className="create-button"
-                                onClick={startCreateNewDocument}
+                                onClick={() => startCreateNewDocument(currentDocument?.path || '')}
                             >
                                 <FilePlusIcon />
                                 {!isMobile && t('common.create')}
@@ -1993,6 +2035,14 @@ function App() {
                                             )}
                                         </>
                                     )}
+                                    {createMode && draftId && (
+                                        <div
+                                            className="dropdown-item danger"
+                                            onClick={handleDeleteDraftClick}
+                                        >
+                                            <TrashIcon /> {t('sections.deleteDraft')}
+                                        </div>
+                                    )}
                                     <a
                                         href="https://github.com/portwn/okidoki"
                                         target="_blank"
@@ -2017,15 +2067,15 @@ function App() {
                                 <DocumentTree
                                     documents={documents}
                                     currentDocPath={currentDocument?.path}
+                                    selectedPath={moveTargetId}
                                     onSelect={(_id, path) => setMoveTargetId(path.join('/'))}
                                     expandedNodes={expandedNodes}
                                     toggleExpand={toggleExpand}
                                     loadChildren={loadChildren}
                                     loadingParents={loadingParents}
-                                    onCreateNewDocument={() => {
-                                        setShowMoveModal(false);
-                                        startCreateNewDocument();
-                                    }}
+                                    showCreateButton={false}
+                                    showRootOption={!!currentDocument?.path?.includes('/')}
+                                    rootDisabled={!currentDocument?.path?.includes('/')}
                                 />
                             </div>
                             <div className="modal-buttons">
@@ -2041,7 +2091,7 @@ function App() {
                                 <button
                                     className="confirm-button"
                                     onClick={() => moveDocument(moveTargetId)}
-                                    disabled={!moveTargetId || isLoading}
+                                    disabled={moveTargetId === null || isLoading}
                                 >
                                     {isLoading ? t('status.moving') : t('common.move')}
                                 </button>

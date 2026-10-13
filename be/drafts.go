@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"time"
 )
 
@@ -14,6 +15,9 @@ var validDraftID = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 
 // ErrInvalidDraftID — invalid draft ID (mapped to 400 in the API).
 var ErrInvalidDraftID = errors.New("invalid draft ID")
+
+// ErrDraftNotFound — the draft file does not exist (mapped to 404 in the API).
+var ErrDraftNotFound = errors.New("draft not found")
 
 func validateDraftID(id string) error {
 	if !validDraftID.MatchString(id) {
@@ -55,7 +59,7 @@ func (ds *DraftStorage) GetDraft(id string) (*Draft, error) {
 	data, err := os.ReadFile(filepath.Join(ds.draftsDir, id+".json"))
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, errors.New("draft not found")
+			return nil, ErrDraftNotFound
 		}
 		return nil, err
 	}
@@ -100,6 +104,13 @@ func (ds *DraftStorage) SetDraft(draft Draft) error {
 		draft.CreatedAt = time.Now()
 	}
 
+	// Skip the write (and the mtime churn) when nothing meaningful changed.
+	existing, err := ds.GetDraft(draft.ID)
+	if err == nil && existing.Title == draft.Title && existing.Content == draft.Content &&
+		existing.Path == draft.Path && slices.Equal(existing.Attachments, draft.Attachments) {
+		return nil
+	}
+
 	data, err := json.Marshal(draft)
 	if err != nil {
 		return err
@@ -108,6 +119,7 @@ func (ds *DraftStorage) SetDraft(draft Draft) error {
 	return os.WriteFile(filepath.Join(ds.draftsDir, draft.ID+".json"), data, 0644)
 }
 
+// DeleteDraft is idempotent: deleting an already-removed draft is a success.
 func (ds *DraftStorage) DeleteDraft(id string) error {
 	if err := validateDraftID(id); err != nil {
 		return err
@@ -116,7 +128,7 @@ func (ds *DraftStorage) DeleteDraft(id string) error {
 	os.RemoveAll(filepath.Join(ds.draftsDir, id))
 	err := os.Remove(filepath.Join(ds.draftsDir, id+".json"))
 	if os.IsNotExist(err) {
-		return errors.New("draft not found")
+		return nil
 	}
 	return err
 }

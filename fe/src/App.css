@@ -471,6 +471,22 @@ button:disabled {
     color: var(--accent);
 }
 
+/* Row-wide highlight: current document in the sidebar, move target in the modal. */
+.document-item.active,
+.document-item.selected {
+    background: var(--surface);
+}
+
+.document-item.selected .document-title {
+    font-weight: 600;
+    color: var(--accent);
+}
+
+.document-item.root-item.disabled {
+    opacity: 0.5;
+    cursor: default;
+}
+
 .children-container {
     margin-top: var(--sp-1);
     padding-left: var(--sp-2);
@@ -682,23 +698,36 @@ button:disabled {
     overflow: visible;
 }
 
+/* System-generated view of a not-yet-written document (deliberately
+   styled as UI, not like markdown content). */
 .empty-document {
-    padding: var(--sp-5);
+    margin-top: var(--sp-3);
+    padding: var(--sp-4);
     color: var(--text-subtle);
+    background: var(--surface);
+    border: 1px dashed var(--border-strong);
+    border-radius: var(--r-lg);
 }
 
 .empty-document .no-content {
-    margin-bottom: var(--sp-4);
+    display: flex;
+    align-items: center;
+    gap: var(--sp-2);
     font-size: var(--fs-lg);
     color: var(--text-muted);
 }
 
+.empty-document .no-content svg {
+    width: 18px;
+    height: 18px;
+}
+
 .empty-document .children-section {
-    margin-top: var(--sp-5);
+    margin-top: var(--sp-4);
 }
 
 .children-section h3 {
-    margin: 0 0 var(--sp-2);
+    margin: 0;
     font-size: var(--fs-md);
     color: var(--text);
 }
@@ -711,16 +740,48 @@ button:disabled {
 }
 
 .child-document-item {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-2);
     padding: 8px 12px;
     color: var(--text);
+    background: var(--bg);
+    border: 1px solid var(--border);
     border-radius: var(--r-md);
     cursor: pointer;
-    transition: background-color var(--t), color var(--t);
+    transition: background-color var(--t), color var(--t), border-color var(--t);
 }
 
 .child-document-item:hover {
     color: var(--accent);
     background: var(--accent-soft-bg);
+    border-color: var(--accent-soft-border);
+}
+
+.child-document-item .child-icon svg {
+    width: 15px;
+    height: 15px;
+}
+
+.child-document-item .child-title {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.child-document-item .child-chevron {
+    display: inline-flex;
+    color: var(--text-muted);
+}
+
+.child-document-item:hover .child-chevron {
+    color: var(--accent);
+}
+
+.child-document-item .child-chevron svg {
+    width: 14px;
+    height: 14px;
 }
 
 /* ============================================================
